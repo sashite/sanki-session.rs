@@ -240,7 +240,16 @@ pub fn natural_state<'a>(
                 match next {
                     Some(successor) => {
                         state = successor;
-                        anchor = at;
+                        // The selection boundary NEVER rewinds: an applied premove
+                        // carries an ANTERIOR timing, and anchoring the next slot on
+                        // it would (a) misclassify the next slot's blind candidates
+                        // as informed and (b) — through the kernel clock, which holds
+                        // its own monotonic anchor — disagree with the time actually
+                        // chargeable. The anchor is the moment the position became
+                        // answerable: the max of the timings so far (time-accounting
+                        // §Elapsed time; pinned by the shared conformance vector
+                        // `scenario.premove-anchor-never-rewinds`).
+                        anchor = anchor.max(at);
                         half_move = half_move.saturating_add(1);
                     }
                     None => break Conclusion::Terminal(outcome.verdict, at),

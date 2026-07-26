@@ -4,6 +4,31 @@ All notable changes to this crate are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] — 2026-07-26
+
+Follows the engine's 0.6.1 release: the kernel clock anchor never rewinds.
+
+### Fixed
+
+- **The selection boundary never rewinds after an applied premove.** The
+  natural-state replay advanced the slot boundary to the selected Ply's
+  canonical timing verbatim; a premove's ANTERIOR timing therefore rewound it,
+  (a) misclassifying the next slot's blind candidates as informed and (b) — via
+  the kernel clock — billing the next mover for time before the position was
+  theirs to answer, up to a wrongful `timeout` flagged on that mover's own
+  half-move (a 4-second reply read as 13). The boundary now advances
+  monotonically (`anchor.max(at)`), mirroring the engine's fixed
+  `SessionState::advance`. `sashite-sanki-engine` is required at **0.6.1** —
+  the new shared conformance vector `scenario.premove-anchor-never-rewinds`
+  fails against 0.6.0.
+
+### Added
+
+- **Conformance: `scenario.premove-anchor-never-rewinds`** (scenarios corpus) —
+  an 18-second bank, a step-2 premove attested before the opponent's step-1
+  reply, and a 4-real-second answer that must NOT flag. Byte-identical to the
+  client corpus copy (sanki.app.sveltekit `conformance/scenarios.json`).
+
 ## [0.9.0] — 2026-07-22
 
 Follows the engine's 0.6.0 release, which adds the absolute move cap
