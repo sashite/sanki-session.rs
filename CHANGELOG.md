@@ -4,6 +4,27 @@ All notable changes to this crate are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] — 2026-07-27
+
+No arbiter code change; the rule behaviour changes through the engine.
+
+### Changed
+
+- **Engine bumped to `sashite-sanki-engine` 0.7** — castling extended to ōgi
+  and xiongqi (deciders' ruling, 2026-07-27; the chess and ōgi King, the
+  xiongqi General `G^`, FIDE mechanics; canonical initial FEENs gain the `-R`
+  corner markers). The arbiter's legality, replay, and terminal detection —
+  all reached through `kernel::step` — now accept and canonicalize the new
+  castlings; see the engine's 0.7.0 changelog for the full rule statement.
+- **Conformance: scenarios corpus re-synced to v7.** Two founding positions
+  whose active royal stands in check
+  (`scenario.insufficiency-closes-the-chain`,
+  `scenario.deadposition-chess-kb-closes-the-chain`) now carry the canonical
+  `-K^` marker, matching the legality corpus's v2 check-marker
+  canonicalization (engine 0.7.0). Chains, expected values, and schema are
+  unchanged — the marker is decorative for replay. Byte-identical to the
+  editorial source (web-specs.md).
+
 ## [0.9.3] — 2026-07-27
 
 Test data only, no code change.

@@ -1,5 +1,5 @@
 {
-	"version": 6,
+	"version": 7,
 	"category": "scenario",
 	"vectors": [
 		{
@@ -662,7 +662,7 @@
 		{
 			"id": "scenario.insufficiency-closes-the-chain",
 			"note": "the checking rook is captured by the king, leaving the two lone royals: an immediate insufficiency draw ON that ply — the second player's legal reply is void",
-			"position": "4k^3/8/8/8/8/8/8/3rK^3 / W/w",
+			"position": "4k^3/8/8/8/8/8/8/3r-K^3 / W/w",
 			"t0": 0,
 			"cutoff": 1000,
 			"plies": [
@@ -3973,7 +3973,7 @@
 		{
 			"id": "scenario.deadposition-chess-kb-closes-the-chain",
 			"note": "the checking rook is captured by the king, leaving King + Bishop versus King: an immediate dead-position draw ON that ply (rules-of-chess §Dead-Position Detection) — the second player's legal reply is void",
-			"position": "4k^3/8/8/8/8/8/8/3rK^2B / W/w",
+			"position": "4k^3/8/8/8/8/8/8/3r-K^2B / W/w",
 			"t0": 0,
 			"cutoff": 1000,
 			"plies": [

@@ -1,6 +1,6 @@
 [package]
 name = "sashite-sanki-arbiter"
-version = "0.9.3"
+version = "0.10.0"
 edition = "2021"
 rust-version = "1.81"
 license = "Apache-2.0"
@@ -12,7 +12,7 @@ keywords = ["chess", "ogi", "xiongqi", "board-game", "arbiter"]
 categories = ["games", "game-development"]
 
 [dependencies]
-sashite-sanki-engine = "0.6.2"
+sashite-sanki-engine = "0.7"
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }
