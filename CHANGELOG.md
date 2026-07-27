@@ -4,6 +4,38 @@ All notable changes to this crate are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] — 2026-07-27
+
+Test data only, no code change.
+
+### Added
+
+- **Conformance: the chain-level equal-timing races** (scenarios corpus, two
+  additive v6 vectors). `scenario.race-equal-timing-informed-smallest-id`:
+  same signer, same slot, same canonical timing, two DIFFERENT legal moves
+  (the double-publish family) — the informed window breaks the tie to the
+  **smallest** event id. `scenario.race-equal-timing-anterior-largest-id`:
+  two premoves in the same anterior second — the anterior window breaks to
+  the **largest** id (a same-second re-premove still supersedes,
+  deterministically). Both pin the id tiebreak the selection rule already
+  defines (category B) at the whole-chain level: the arbiter and the client
+  must select the same event or they finalise/display different games.
+  Byte-identical to the client corpus copy and to the editorial source
+  (web-specs.md).
+
+## [0.9.2] — 2026-07-27
+
+Test data only, no code change.
+
+### Changed
+
+- **Conformance corpus re-embedded in its canonical byte form**
+  (`tests/conformance/scenarios.json` — formatting only, verified
+  vector-by-vector identical in content). The Sanki client's
+  cross-implementation gate compares the corpus copies **byte-for-byte**
+  against the published crates, so the canonical (prettier-shaped) bytes now
+  ship in the crate itself.
+
 ## [0.9.1] — 2026-07-26
 
 Follows the engine's 0.6.1 release: the kernel clock anchor never rewinds.

@@ -8857,6 +8857,84 @@
 			],
 			"expectedChain": ["m1", "m2", "pre", "m3"],
 			"expectedTermination": null
+		},
+		{
+			"id": "scenario.race-equal-timing-informed-smallest-id",
+			"note": "same signer, same slot, SAME canonical timing, DIFFERENT moves (the double-publish family): d1 (e8-d8) and d2 (e8-e7) are both legal and both timed at 20 — informed window, so the tie breaks to the SMALLEST id, d1, deterministically. Both implementations must pick the same event or the arbiter finalises one game while the client displays another",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 10
+				},
+				{
+					"id": "d1",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "d8", null],
+					"timedAt": 20
+				},
+				{
+					"id": "d2",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e7", null],
+					"timedAt": 20
+				},
+				{
+					"id": "m3",
+					"seat": "first",
+					"step": 2,
+					"move": ["a4", "a5", null],
+					"timedAt": 30
+				}
+			],
+			"expectedChain": ["m1", "d1", "m3"],
+			"expectedTermination": null
+		},
+		{
+			"id": "scenario.race-equal-timing-anterior-largest-id",
+			"note": "two premoves for the same slot at the SAME anterior timing (both at 15, before the boundary 20 set by m2), different moves, both legal: the anterior window sorts newest-first with the id as the descending tiebreaker, so the LARGEST id, p2, wins — a same-second re-premove still supersedes deterministically",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 10
+				},
+				{
+					"id": "p1",
+					"seat": "first",
+					"step": 2,
+					"move": ["a4", "a5", null],
+					"timedAt": 15
+				},
+				{
+					"id": "p2",
+					"seat": "first",
+					"step": 2,
+					"move": ["a4", "b4", null],
+					"timedAt": 15
+				},
+				{
+					"id": "m2",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e7", null],
+					"timedAt": 20
+				}
+			],
+			"expectedChain": ["m1", "m2", "p2"],
+			"expectedTermination": null
 		}
 	]
 }
