@@ -285,6 +285,96 @@ mod tests {
     }
 
     #[test]
+    fn parse_accepts_uppercase_and_normalizes_to_lowercase() {
+        // Nostr ids are canonically lowercase hex, but the decoding is
+        // case-insensitive; `Display` re-encodes in the canonical form, so a
+        // round trip normalizes rather than preserving the input's case.
+        let upper = "AABBCCDD".repeat(8);
+        let lower = "aabbccdd".repeat(8);
+        let id = EventId::parse(&upper).expect("valid hex");
+        assert_eq!(id.to_string(), lower);
+        assert_eq!(id, EventId::parse(&lower).expect("valid hex"));
+
+        let mixed = "AbCdEf0123456789".repeat(4);
+        assert_eq!(
+            PublicKey::parse(&mixed),
+            PublicKey::parse(&mixed.to_lowercase()),
+        );
+        assert_eq!(
+            PublicKey::parse(&mixed).expect("valid hex").to_string(),
+            mixed.to_lowercase(),
+        );
+    }
+
+    #[test]
+    fn parse_measures_bytes_and_decodes_ascii_only() {
+        // The length gate counts BYTES while the decoding walks CHARS: a string
+        // of exactly 64 bytes but fewer characters passes the gate and must then
+        // be rejected by the decoding, not read past its end.
+        let multibyte = format!("{}{}", "é".repeat(2), "0".repeat(60)); // 64 bytes, 62 chars
+        assert_eq!(multibyte.len(), 64);
+        assert_eq!(multibyte.chars().count(), 62);
+        assert!(EventId::parse(&multibyte).is_none());
+        assert!(PublicKey::parse(&multibyte).is_none());
+
+        // A non-ASCII decimal digit is not a hex digit either.
+        let arabic_indic = format!("{}{}", '\u{0663}', "0".repeat(62)); // 64 bytes
+        assert_eq!(arabic_indic.len(), 64);
+        assert!(EventId::parse(&arabic_indic).is_none());
+
+        // Neighbouring lengths and non-hex ASCII, none of which may panic.
+        for rejected in [
+            String::new(),
+            "0".repeat(63),
+            "0".repeat(65),
+            format!(" {}", "0".repeat(63)),
+            format!("{}+=", "0".repeat(62)),
+            format!("{}gg", "0".repeat(62)),
+        ] {
+            assert!(EventId::parse(&rejected).is_none(), "{rejected:?}");
+        }
+    }
+
+    #[test]
+    fn event_id_order_is_the_raw_byte_order() {
+        // The ordering is the race tiebreak ("smallest event ID") and is shared
+        // with the TypeScript client, which compares the canonical lowercase hex
+        // STRINGS: the two orders must coincide, or the two implementations would
+        // select different events on a tie.
+        let hexes = [
+            "00".to_owned() + &"0".repeat(62),
+            "0f".to_owned() + &"0".repeat(62),
+            "10".to_owned() + &"0".repeat(62),
+            "7f".to_owned() + &"0".repeat(62),
+            "80".to_owned() + &"0".repeat(62),
+            "ff".to_owned() + &"0".repeat(62),
+            "ff".to_owned() + &"f".repeat(62),
+        ];
+        let mut by_bytes: Vec<EventId> = hexes
+            .iter()
+            .map(|hex| EventId::parse(hex).expect("valid hex"))
+            .collect();
+        by_bytes.sort();
+        let mut by_string = hexes.clone();
+        by_string.sort();
+        let encoded: Vec<String> = by_bytes.iter().map(ToString::to_string).collect();
+        assert_eq!(encoded, by_string.to_vec());
+
+        // The comparison is big-endian: the first differing byte decides, and the
+        // last byte still separates two otherwise identical ids.
+        let mut high = [0_u8; 32];
+        high[0] = 1;
+        let mut low = [255_u8; 32];
+        low[0] = 0;
+        assert!(EventId::from_bytes(high) > EventId::from_bytes(low));
+        let mut a = [7_u8; 32];
+        let mut b = [7_u8; 32];
+        a[31] = 8;
+        b[31] = 9;
+        assert!(EventId::from_bytes(a) < EventId::from_bytes(b));
+    }
+
+    #[test]
     fn public_key_equality() {
         let a = PublicKey::from_bytes([7; 32]);
         let b = PublicKey::from_bytes([7; 32]);

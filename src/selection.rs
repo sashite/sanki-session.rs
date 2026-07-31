@@ -168,6 +168,40 @@ mod tests {
         move |id| legal.contains(id)
     }
 
+    /// A legality probe that records, in order, every id it is asked about. The
+    /// recorded trace is the direct evidence for the normative anti-flooding
+    /// bound of Move Encoding — Sanki §Bounding a slot's candidates: legality is
+    /// consulted **lazily**, on the capped window ends only, so a candidate the
+    /// cap excluded is never probed at all.
+    fn recording_probe<'a>(
+        legal: &'static [&'static str],
+        seen: &'a mut Vec<&'static str>,
+    ) -> impl FnMut(&&'static str) -> bool + 'a {
+        move |id| {
+            seen.push(*id);
+            legal.contains(id)
+        }
+    }
+
+    /// Every permutation of `items`, i.e. every order in which a caller might
+    /// supply the same candidate set. Selection is a pure function of that set,
+    /// so all of them must yield the same verdict.
+    fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
+        if items.len() <= 1 {
+            return vec![items.to_vec()];
+        }
+        let mut orders = Vec::new();
+        for index in 0..items.len() {
+            let mut rest = items.to_vec();
+            let head = rest.remove(index);
+            for mut order in permutations(&rest) {
+                order.insert(0, head.clone());
+                orders.push(order);
+            }
+        }
+        orders
+    }
+
     #[test]
     fn single_informed_legal_applied() {
         let cs = [cand("a1", 120)];
@@ -310,7 +344,11 @@ mod tests {
     fn legality_probes_are_bounded_by_the_cap() {
         // The normative anti-flooding bound (Move Encoding — Sanki §Bounding a
         // slot's candidates): 20 candidates flooded on each side of the
-        // boundary, cap K=2 — at most 2K probes, whatever the flood size.
+        // boundary, cap K=2 — exactly 2K probes, whatever the flood size, and
+        // they fall on the *ends of the two capped windows*: the 2 most recent
+        // anterior (ids 19, 18, newest first) then the 2 earliest informed (ids
+        // 100, 101, oldest first). Asserting the trace — not merely a `<= 2K`
+        // ceiling — is what a regression to eager probing must fail.
         let mut cs: Vec<Candidate<usize>> = Vec::new();
         for i in 0..20 {
             cs.push(Candidate {
@@ -322,13 +360,23 @@ mod tests {
                 created_at: ts(200 + i64::try_from(i).expect("small")),
             }); // informed
         }
-        let mut probes = 0usize;
-        let selection = select_candidate(ts(100), &cs, 2, |_id| {
-            probes += 1;
+        let mut probed: Vec<usize> = Vec::new();
+        let selection = select_candidate(ts(100), &cs, 2, |id| {
+            probed.push(*id);
             false // everything illegal: both windows scanned to their cap
         });
         assert_eq!(selection, Selection::Unfilled);
-        assert!(probes <= 4, "expected at most 2K = 4 probes, got {probes}");
+        assert_eq!(probed, [19, 18, 100, 101]);
+
+        // Short-circuiting: the first legal candidate stops the scan, so the same
+        // flood costs a single probe when the newest premove is legal.
+        let mut probed: Vec<usize> = Vec::new();
+        let selection = select_candidate(ts(100), &cs, 2, |id| {
+            probed.push(*id);
+            *id == 19
+        });
+        assert_eq!(selection.selected().map(|chosen| chosen.id), Some(19));
+        assert_eq!(probed, [19]);
     }
 
     #[test]
@@ -345,5 +393,248 @@ mod tests {
             select_candidate(ts(0), &illegal, CANDIDATE_CAP, probe(&[])),
             Selection::Unfilled
         );
+        // A candidate timed exactly AT t₀ is informed as well (the `>=` side of
+        // the split, pinned discriminatingly by
+        // `boundary_is_exclusive_below_and_inclusive_at`), so the first slot can
+        // hold no anterior candidate at all: the earliest legal live move binds.
+        let at_t0 = [cand("a0", 0), cand("a1", 5)];
+        assert_eq!(
+            select_candidate(ts(0), &at_t0, CANDIDATE_CAP, probe(&["a0", "a1"]))
+                .selected()
+                .map(|chosen| chosen.id),
+            Some("a0")
+        );
+    }
+
+    #[test]
+    fn boundary_is_exclusive_below_and_inclusive_at() {
+        // Move Encoding — Sanki §Slot candidates and selection: strictly before
+        // `T` is anterior, **at or after** `T` is informed. A candidate timed
+        // exactly at `T` is therefore informed, which these two observations pin
+        // together — neither alone would:
+        //   (a) it LOSES to a legal candidate one second earlier. Were it
+        //       anterior it would be the *more recent* premove and win the
+        //       anterior window; it does not, so it is not anterior;
+        //   (b) it is nevertheless reached, as a live move, once the anterior
+        //       window yields nothing.
+        let cs = [cand("before", 99), cand("at_t", 100)];
+        assert_eq!(
+            select_candidate(ts(100), &cs, CANDIDATE_CAP, probe(&["before", "at_t"]))
+                .selected()
+                .map(|chosen| chosen.id),
+            Some("before")
+        );
+        assert_eq!(
+            select_candidate(ts(100), &cs, CANDIDATE_CAP, probe(&["at_t"]))
+                .selected()
+                .map(|chosen| chosen.id),
+            Some("at_t")
+        );
+    }
+
+    #[test]
+    fn anterior_tie_skips_the_larger_id_when_illegal() {
+        // The anterior mirror of the corpus vector
+        // `selection.informed-tie-createdat-first-legal-by-id`: at equal canonical
+        // timing the anterior window scans by DESCENDING id — the asymmetry with
+        // the informed window is deliberate (a same-second re-premove supersedes),
+        // so the larger id is probed first and, when illegal, the smaller binds.
+        let cs = [cand("b1", 60), cand("b2", 60)];
+        let mut probed = Vec::new();
+        let chosen = select_candidate(
+            ts(100),
+            &cs,
+            CANDIDATE_CAP,
+            recording_probe(&["b1"], &mut probed),
+        )
+        .selected()
+        .map(|chosen| chosen.id);
+        assert_eq!(chosen, Some("b1"));
+        assert_eq!(probed, ["b2", "b1"]);
+    }
+
+    #[test]
+    fn anterior_cap_admits_exactly_k_and_no_more() {
+        // The anterior window keeps the K MOST RECENT candidates by
+        // (created_at, id). With K = 4 and four premoves, the oldest is still
+        // inside the window and costs the full four probes.
+        let four = [
+            cand("a1", 10),
+            cand("a2", 20),
+            cand("a3", 30),
+            cand("a4", 40),
+        ];
+        let mut probed = Vec::new();
+        assert_eq!(
+            select_candidate(ts(100), &four, 4, recording_probe(&["a1"], &mut probed))
+                .selected()
+                .map(|chosen| chosen.id),
+            Some("a1")
+        );
+        assert_eq!(probed, ["a4", "a3", "a2", "a1"]);
+
+        // A fifth, more recent premove pushes the oldest out of the window. `a1`
+        // is still LEGAL and the slot is nonetheless unfilled — and the probe
+        // trace proves the cap, not legality, is what excluded it: `a1` is never
+        // asked about.
+        let five = [
+            cand("a1", 10),
+            cand("a2", 20),
+            cand("a3", 30),
+            cand("a4", 40),
+            cand("a5", 50),
+        ];
+        let mut probed = Vec::new();
+        assert_eq!(
+            select_candidate(ts(100), &five, 4, recording_probe(&["a1"], &mut probed)),
+            Selection::Unfilled
+        );
+        assert_eq!(probed, ["a5", "a4", "a3", "a2"]);
+    }
+
+    #[test]
+    fn informed_cap_admits_exactly_k_and_no_more() {
+        // The informed window keeps the K EARLIEST candidates — the opposite end.
+        // With K = 4 and four live moves, the latest is still inside the window.
+        let four = [
+            cand("a1", 10),
+            cand("a2", 20),
+            cand("a3", 30),
+            cand("a4", 40),
+        ];
+        let mut probed = Vec::new();
+        assert_eq!(
+            select_candidate(ts(0), &four, 4, recording_probe(&["a4"], &mut probed))
+                .selected()
+                .map(|chosen| chosen.id),
+            Some("a4")
+        );
+        assert_eq!(probed, ["a1", "a2", "a3", "a4"]);
+
+        // A fifth, later live move is beyond the cap: legal, unreached, unfilled.
+        let five = [
+            cand("a1", 10),
+            cand("a2", 20),
+            cand("a3", 30),
+            cand("a4", 40),
+            cand("a5", 50),
+        ];
+        let mut probed = Vec::new();
+        assert_eq!(
+            select_candidate(ts(0), &five, 4, recording_probe(&["a5"], &mut probed)),
+            Selection::Unfilled
+        );
+        assert_eq!(probed, ["a1", "a2", "a3", "a4"]);
+    }
+
+    #[test]
+    fn empty_and_zero_cap_inputs_are_unfilled_without_probing() {
+        // No candidate at all: unfilled, and legality is never consulted.
+        let none: [Candidate<&'static str>; 0] = [];
+        let mut probed = Vec::new();
+        assert_eq!(
+            select_candidate(
+                ts(100),
+                &none,
+                CANDIDATE_CAP,
+                recording_probe(&[], &mut probed)
+            ),
+            Selection::Unfilled
+        );
+        assert!(probed.is_empty());
+
+        // A degenerate K = 0 admits nothing into either window — the ≤ 2K bound
+        // holds at its lower extreme too, in both windows.
+        let anterior = [cand("p1", 50)];
+        let mut probed = Vec::new();
+        assert_eq!(
+            select_candidate(ts(100), &anterior, 0, recording_probe(&["p1"], &mut probed)),
+            Selection::Unfilled
+        );
+        assert!(probed.is_empty());
+        let informed = [cand("L1", 150)];
+        let mut probed = Vec::new();
+        assert_eq!(
+            select_candidate(ts(100), &informed, 0, recording_probe(&["L1"], &mut probed)),
+            Selection::Unfilled
+        );
+        assert!(probed.is_empty());
+    }
+
+    #[test]
+    fn extreme_timestamps_partition_without_saturating() {
+        // `Timestamp` is a signed Unix second, so a candidate may legitimately
+        // carry a negative or extremal instant. The split is a plain comparison —
+        // no arithmetic, hence nothing to saturate or wrap at the extremes.
+        // At `i64::MIN` the boundary admits nothing below it: a candidate timed
+        // exactly there is informed (`>=`), not anterior.
+        let floor = [cand("m", i64::MIN)];
+        assert_eq!(
+            select_candidate(ts(i64::MIN), &floor, CANDIDATE_CAP, probe(&["m"]))
+                .selected()
+                .map(|chosen| chosen.id),
+            Some("m")
+        );
+        // At `i64::MAX` everything below is anterior, and the latest legal wins.
+        let ceiling = [cand("lo", i64::MIN), cand("hi", i64::MAX - 1)];
+        assert_eq!(
+            select_candidate(ts(i64::MAX), &ceiling, CANDIDATE_CAP, probe(&["lo", "hi"]))
+                .selected()
+                .map(|chosen| chosen.id),
+            Some("hi")
+        );
+        // Negative instants order normally: the latest legal premove is the one
+        // closest to the boundary.
+        let negative = [cand("n1", -100), cand("n2", -50)];
+        assert_eq!(
+            select_candidate(ts(0), &negative, CANDIDATE_CAP, probe(&["n1", "n2"]))
+                .selected()
+                .map(|chosen| chosen.id),
+            Some("n2")
+        );
+    }
+
+    #[test]
+    fn selection_is_independent_of_the_input_order() {
+        // Determinism (README §Design guarantees): the verdict is a pure function
+        // of the candidate SET. A partial `sort_by` — one whose comparator ignored
+        // the id tiebreak — would surface only here, since the stable sort would
+        // then leak the caller's order into the scan. Every one of the 120 input
+        // orders of this set must give not only the same selection but the same
+        // probe trace: two anterior candidates tied at 40, one at 90, and two
+        // informed candidates tied at 100, under a cap of 2.
+        let base = [
+            cand("p1", 40),
+            cand("p2", 40),
+            cand("p3", 90),
+            cand("L1", 100),
+            cand("L2", 100),
+        ];
+        for order in permutations(&base) {
+            let mut probed = Vec::new();
+            let chosen = select_candidate(
+                ts(100),
+                &order,
+                2,
+                recording_probe(&["p1", "L1"], &mut probed),
+            )
+            .selected()
+            .map(|chosen| chosen.id);
+            // The 2 most recent premoves (p3, then p2 — the larger id of the tie)
+            // are both illegal, so the earliest legal live move binds.
+            assert_eq!(chosen, Some("L1"), "input order {order:?}");
+            assert_eq!(probed, ["p3", "p2", "L1"], "input order {order:?}");
+        }
+        // The same set under the production cap reaches the older legal premove,
+        // and that too is order-independent.
+        for order in permutations(&base) {
+            assert_eq!(
+                select_candidate(ts(100), &order, CANDIDATE_CAP, probe(&["p1", "L1"]))
+                    .selected()
+                    .map(|chosen| chosen.id),
+                Some("p1"),
+                "input order {order:?}"
+            );
+        }
     }
 }

@@ -162,6 +162,15 @@ impl SessionParams {
     /// under Sanki's strict alternation: within each step value, side `first`
     /// moves before side `second` — so odd positions belong to `first`, even
     /// ones to `second`.
+    ///
+    /// A pure function of the position — it reads neither the board nor the
+    /// session's history — and total over `u32`: the parity is exact at both
+    /// ends of the range, so nothing saturates. It presupposes what the Game
+    /// Session (kind `6422`) supplies, an **initial position with `first` to
+    /// move**; the engine's own turn tracking then stays in lockstep with it
+    /// half-move for half-move (pinned by `verdict`'s
+    /// `the_engine_turn_tracks_the_arbiter_play_order`). `half_move` is 1-based:
+    /// `0` denotes no slot and its answer is meaningless.
     #[inline]
     #[must_use]
     pub const fn side_at(&self, half_move: u32) -> Side {
@@ -310,6 +319,108 @@ mod tests {
         assert_eq!(p.player_at(1), pk(10));
         assert_eq!(p.player_at(2), pk(20));
         assert_eq!(p.player_at(3), pk(10));
+    }
+
+    #[test]
+    fn play_order_mapping_is_exact_at_the_u32_extremes() {
+        // The mapping is a bijection between play-order positions and slots:
+        // position `2n − 1` is (first, step n), position `2n` is (second, step n).
+        // `arithmetic_side_effects` being denied, `step_at` divides rather than
+        // multiplies — the pairing must therefore still hold where a doubling
+        // would overflow, at the top of the range.
+        let p = params();
+        for n in [1_u32, 2, 3, 500, 2_147_483_646, 2_147_483_647] {
+            let odd = n
+                .checked_mul(2)
+                .and_then(|d| d.checked_sub(1))
+                .expect("fits");
+            let even = n.checked_mul(2).expect("fits");
+            assert_eq!(p.side_at(odd), Side::First, "position {odd}");
+            assert_eq!(p.step_at(odd), n, "position {odd}");
+            assert_eq!(p.side_at(even), Side::Second, "position {even}");
+            assert_eq!(p.step_at(even), n, "position {even}");
+        }
+
+        // The last two positions a `u32` can name: `u32::MAX` is odd, so it is
+        // `first`'s step 2^31 — the doubling that would name it overflows, the
+        // halving does not, and nothing is silently saturated.
+        assert_eq!(p.side_at(u32::MAX), Side::First);
+        assert_eq!(p.step_at(u32::MAX), 2_147_483_648);
+        assert_eq!(p.player_at(u32::MAX), pk(10));
+        assert_eq!(p.side_at(u32::MAX - 1), Side::Second);
+        assert_eq!(p.step_at(u32::MAX - 1), 2_147_483_647);
+        assert_eq!(p.player_at(u32::MAX - 1), pk(20));
+
+        // Position 0 is outside the 1-based domain: it is answered without
+        // panicking or wrapping, and names a `step` no conforming Ply can carry
+        // (kind `6423` §Step semantics: `step >= 1`), so it can match nothing.
+        assert_eq!(p.step_at(0), 0);
+    }
+
+    #[test]
+    fn side_of_maps_only_the_two_players() {
+        // The `None` here is the gate that keeps a non-player's Adjudication
+        // Request from resolving as a resignation (kind `6424` §Semantic
+        // constraints, item 3), so it must not be approximate: only the two exact
+        // 32-byte player keys map.
+        let p = params();
+        assert_eq!(p.side_of(pk(10)), Some(Side::First));
+        assert_eq!(p.side_of(pk(20)), Some(Side::Second));
+        for stranger in [
+            pk(2), // the arbiter
+            pk(3), // the timestamper
+            pk(0), // the all-zero key
+            pk(255),
+        ] {
+            assert_eq!(p.side_of(stranger), None, "{stranger} is not a player");
+            assert!(!p.is_player(stranger));
+        }
+        // A key one byte away from a player's is a different key.
+        for player in [10_u8, 20] {
+            let mut near = [player; 32];
+            near[31] = player.wrapping_add(1);
+            let near = PublicKey::from_bytes(near);
+            assert_eq!(p.side_of(near), None);
+            let mut near = [player; 32];
+            near[0] = player.wrapping_sub(1);
+            let near = PublicKey::from_bytes(near);
+            assert_eq!(p.side_of(near), None);
+        }
+    }
+
+    #[test]
+    fn initial_kernel_state_starts_in_the_first_period() {
+        // The kernel clocks start symmetric on the FIRST period of a multi-period
+        // control (kind `6420` §time_control); the later periods are reached by
+        // ticking, never at the start.
+        let main = Period::new(Duration::from_secs(900), None, None).expect("valid period");
+        let overtime = Period::new(
+            Duration::from_secs(0),
+            Some(Duration::from_secs(30)),
+            Some(1),
+        )
+        .expect("valid period");
+        let p = SessionParams::new(
+            id(1),
+            pk(2),
+            Some(pk(3)),
+            pk(10),
+            pk(20),
+            TimeControl::new(main, vec![overtime]),
+            Position::parse(START_FEEN).expect("valid Sanki FEEN"),
+            Timestamp::from_unix(1000),
+        );
+        assert_eq!(p.time_control().period_count(), 2);
+        let state = p.initial_state();
+        for side in [Side::First, Side::Second] {
+            let clock = state.clocks().get(side);
+            assert_eq!(clock.remaining(), Duration::from_secs(900), "{side:?}");
+            assert_eq!(clock.period_index(), 0, "{side:?}");
+            assert_eq!(clock.plies_in_period(), 0, "{side:?}");
+        }
+        assert_eq!(state.last_attestation(), Timestamp::from_unix(1000));
+        // The founding position is `first` to move — the premise `side_at` rests on.
+        assert_eq!(state.position().active_side(), p.side_at(state.half_move()));
     }
 
     #[test]

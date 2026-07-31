@@ -4,6 +4,120 @@ All notable changes to this crate are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] — 2026-07-31
+
+`sashite-sanki-engine` bumped to 0.8, and a reliability review of the whole
+crate around it. The bump is not cosmetic: it **changes verdicts**, and the
+old ones took the game away from the player who had won it.
+
+### Changed
+
+- **`sashite-sanki-engine` bumped to 0.8** (0.8.2 resolved). Engine 0.8.0 fixed
+  a checkmate misreported as `Ongoing` when a cross-variant capture leaves an
+  inert, opposite-cased token in the capturer's hand tray: `has_full_legal_move`
+  was probing the union of both hands, so the mated side appeared to hold a
+  droppable interposition it does not own. `natural_state` applies every Ply
+  through `kernel::step`, so the misclassification reached the verdict directly.
+
+  Measured on a real chess-versus-ōgi session, same events, no arbiter code
+  change: under engine 0.7 the replay concluded `Ongoing` on a mated board, and
+  the invocation fell through to **residual resignation — against the player who
+  had just delivered checkmate**. Under 0.8 it concludes `Terminal(checkmate)`
+  and rules `FirstWins`. On the post-mate position engine 0.7 answers
+  `legal_moves = 0` *and* `status = Ongoing`, which is self-contradictory on its
+  face. The whole 36-vector corpus and a nine-pairing verdict matrix were run
+  against both engines and diffed: only this class of position changes answer.
+
+  Worth knowing for anyone auditing older rulings: the bug only fires on a
+  **distant, blockable** check. A contact-check mate was classified correctly
+  even under 0.7, which is why a corpus could have held a cross-variant mate and
+  still missed this.
+
+### Added
+
+- **Cross-variant conformance coverage, which did not exist.** Before this
+  release every FEEN in the crate — all of `src/`, all of `tests/`, and the
+  whole shared corpus — was chess-versus-chess (19) or ōgi-versus-ōgi (1).
+  **No cross-variant session, and no xiongqi at all**, in the adjudication
+  authority for a game family whose reason to exist is cross-variant play. That
+  is precisely why the engine bug above survived a green suite: the corpus could
+  not express the pattern that triggers it.
+  - `tests/cross_variant.rs` — every pairing adjudicated end-to-end through
+    `adjudicate`, plus the inert-tray mate pinned as a regression, castling in
+    each variant inside a cross-variant session, a cross-variant capture feeding
+    an ōgi hand, cross-variant uchifuzume skipped rather than sanctioned, and
+    xiongqi sideways en passant.
+  - `tests/conformance/scenarios.json` — **version 7 → 8**, 25 → 36 vectors,
+    schema and byte conventions unchanged. All nine style pairs now appear. The
+    new vectors bite: run against engine 0.7 the corpus fails with
+    `TERMINATION MISMATCH scenario.cross-variant-checkmate-with-an-inert-tray:
+    None vs Some("checkmate")`.
+  - `is_legal_matches_the_kernel_step_oracle` widened from 10 chess/ōgi cases to
+    69 across all nine pairings (18 of them illegal, so it is not vacuous), with
+    an `#[ignore]`d exhaustive sweep behind it. This pins the `validate` versus
+    `kernel::step` seam: a divergence there would let a candidate be selected and
+    then bounce off `StepResult::Illegal` into the defensive seam, silently
+    turning a played game into an unfinished one. ~60 M probe pairs over 10 534
+    positions found no divergence.
+
+### Fixed
+
+- **The abandonment gate pardoned an unbounded abandonment.**
+  `Timestamp::duration_since` answers `None` for two unrelated reasons, and the
+  gate conflated them with a single `unwrap_or(Duration::ZERO)`: an *inverted*
+  span (cutoff before the anchor), correctly clamped to zero, and a *forward*
+  span too wide for `i64` subtraction — which was therefore charged zero seconds
+  and flagged nobody. The engine's `kernel::step` draws exactly this distinction
+  for a played Ply and saturates the second case, with a comment warning that
+  charging zero "would let an astronomically late ply pass free"; the arbiter did
+  the thing that comment warns against. Measured: with t₀ = 0 the span fits and
+  the verdict is `Timeout`; one second earlier, at t₀ = −1, the identical
+  abandonment overflowed and became `Resignation` against the *other* player.
+  Within one session the asymmetry was starker still — a player who *plays* at
+  the far end of the range was flagged by the kernel, while a player who did
+  nothing over the same span was ruled within budget. Now saturates, so the two
+  layers agree.
+
+### Notes
+
+Three findings that are **not** code changes, recorded so they are decided
+rather than discovered:
+
+- **The identical-content dedup key ignores the `draw` flag**, and that is
+  observable and asymmetric. In the *informed* window it is immaterial — the
+  earliest legal candidate takes the slot whatever its content. In the
+  *anterior* window the latest legal premove wins, so the key decides: two
+  premoves differing only in the flag collapse to the earlier, flagless one and
+  the offer is destroyed, where the same pair with differing contents keeps both
+  and the acceptance rules `agreement`. Whether an offer attached to a
+  re-submitted move ought to survive is a normative question about kind 6423
+  §Race resolution, and this crate is one of two implementations gated by the
+  same corpus — so the behaviour is pinned by
+  `the_draw_flag_is_outside_the_identical_content_dedup_key` rather than changed
+  here.
+- **A self-timed backdated cutoff can resurrect a draw offer declined by play.**
+  Self-timed is the Sashité default and the cutoff is then the Request's own
+  `created_at`, chosen by its signer. Offer at 100, declined by play at 200,
+  play continues at 300: invoking with `created_at = 400` rules `resignation`,
+  invoking with `150` rules `agreement` — and `select_request`, preferring the
+  earliest, picks the backdated one. Cutoff manipulation is self-harming
+  everywhere else (mate, stalemate, timeout-escape and terminal-erasure all
+  convert a loss into a loss); draw acceptance is the sole exception. Both halves
+  are individually per-spec; the composition needs a decider's call.
+- **Nothing validates that a founding position has `first` to move.** With a
+  `second`-to-move initial FEEN, slot 1 can never be filled, the chain stays
+  empty however much is played, and the abandonment gate charges `second`, who
+  is thereby guaranteed to flag. `SessionParams` is documented as assembled
+  after cross-event validation, so this is an unenforced precondition rather than
+  a defect; enforcing it would need a fallible `SessionParams::new`.
+
+Also closed: two coverage holes found by mutation testing, both of which
+survived 100% of the previous suite — the selection boundary's exactness (a
+candidate timed *exactly* at `T` is informed; flipping `<` to `<=` passed every
+test and every corpus vector) and the informed-window id tiebreak (stable sort
+plus ascending-id input order made deleting it a no-op). Both are
+cross-implementation risks, not just local ones.
+
 ## [0.10.0] — 2026-07-27
 
 No arbiter code change; the rule behaviour changes through the engine.

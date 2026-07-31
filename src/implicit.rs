@@ -10,6 +10,15 @@
 //!   Adjudication Request is signed by that signer's **opponent**: the
 //!   invocation accepts the offer. Result: `50/50`.
 //!
+//! The offer is carried by the chain's **last half-move at the cutoff** — the
+//! Ply the replay actually selected and applied for the last filled slot. Three
+//! consequences worth naming, all pinned by the tests below: a candidate that
+//! carried the flag but lost its slot never offered anything; a reply that the
+//! two-window rule **skipped** (illegal) or that the cutoff excluded did not
+//! extend the chain, so the earlier offer is still the tail; and, under the
+//! forgiving-premove rule, the tail may be an **anterior** Ply (a premove
+//! carrying an offer, applied after the half-move it was published before).
+//!
 //! The other implicit convention — **residual resignation** — needs no
 //! detection of its own: per Statuses — Sanki §Verdict resolution, the
 //! post-chain resolution is ordered `agreement` → abandonment `timeout` →
@@ -29,6 +38,10 @@ use sashite_sanki_engine::domain::status::Status;
 /// Request is signed by its signer's opponent; `None` otherwise (no offer, an
 /// offer extended past by play, an offerer invoking on their own offer, or a
 /// non-player invoker).
+///
+/// It reads the chain's tail and nothing else: whether the replay had already
+/// terminated (a mate outranks any standing offer) and whether a clock has run
+/// out are the caller's ordering concern — see [`crate::verdict`].
 #[must_use]
 pub fn draw_acceptance(
     params: &SessionParams,
@@ -202,5 +215,165 @@ mod tests {
             conclusion: Conclusion::Ongoing(Box::new(params().initial_state())),
         };
         assert!(draw_acceptance(&params(), &natural, &request(77)).is_none());
+    }
+
+    // --- Which Ply carries the standing offer, over a REAL replay ----------
+    //
+    // The tests above hand-build the chain; those below drive the natural-state
+    // replay (`crate::natural_state`) so that the chain — hence the tail the
+    // offer hangs on — is the one the selection rule actually produces.
+
+    const TIMESTAMPER: u8 = 99;
+    const REQUEST: u8 = 170;
+    // A rook-and-king endgame: a stock of legal moves for the replay.
+    const ROOK_KING: &str = "4k^3/8/8/8/8/8/8/R3K^3 / W/w";
+    const RA1A4: &str = "[\"a1\",\"a4\",null]"; // first, step 1
+    const RA1A5: &str = "[\"a1\",\"a5\",null]"; // first, step 1 (a divergent alternative)
+    const KE8E7: &str = "[\"e8\",\"e7\",null]"; // second, step 1
+    const KE8E6: &str = "[\"e8\",\"e6\",null]"; // second, step 1 — illegal (two squares)
+    const RA4A5: &str = "[\"a4\",\"a5\",null]"; // first, step 2
+
+    fn played(id: u8, signer: u8, step: u32, draw: bool, content: &str) -> Ply {
+        Ply::new(
+            eid(id),
+            pk(signer),
+            eid(SESSION),
+            step,
+            draw,
+            content.to_owned(),
+            ts(0),
+        )
+    }
+
+    fn att(id: u8, attests: u8, at: i64) -> crate::event::Attestation {
+        crate::event::Attestation::new(eid(id), pk(TIMESTAMPER), eid(attests), ts(at))
+    }
+
+    /// The session the replayed tests rule on: attested mode, a budget large
+    /// enough that no clock interferes with the chain.
+    fn rook_params() -> SessionParams {
+        let period = Period::new(Duration::from_secs(100_000), None, None).expect("valid period");
+        SessionParams::new(
+            eid(SESSION),
+            pk(2),
+            Some(pk(TIMESTAMPER)),
+            pk(FIRST),
+            pk(SECOND),
+            TimeControl::new(period, Vec::new()),
+            Position::parse(ROOK_KING).expect("valid FEEN"),
+            ts(0),
+        )
+    }
+
+    /// `(accepted by first, accepted by second)` for a replayed chain.
+    fn acceptances(
+        params: &SessionParams,
+        plies: &[Ply],
+        attestations: &[crate::event::Attestation],
+    ) -> (bool, bool) {
+        let natural = crate::natural_state::natural_state(
+            params,
+            plies,
+            attestations,
+            &AdjudicationRequest::new(eid(REQUEST), pk(FIRST), eid(SESSION), pk(2), ts(0)),
+        )
+        .expect("attested request");
+        let agreement = Some(Verdict::drawn(Status::Agreement));
+        (
+            draw_acceptance(params, &natural, &request(FIRST)) == agreement,
+            draw_acceptance(params, &natural, &request(SECOND)) == agreement,
+        )
+    }
+
+    #[test]
+    fn an_anterior_premove_may_carry_the_standing_offer() {
+        // `second` premoves their step 1 at 50 WITH an offer, before `first`'s
+        // step 1 lands at 100. The forgiving rule applies the premove as the
+        // second half-move, so the chain's tail — the standing offer — is
+        // `second`'s, anterior though its timing is. `first` accepts.
+        let p = rook_params();
+        let plies = [
+            played(1, FIRST, 1, false, RA1A4),
+            played(2, SECOND, 1, true, KE8E7),
+        ];
+        let atts = [att(101, 1, 100), att(102, 2, 50), att(171, REQUEST, 1000)];
+        assert_eq!(acceptances(&p, &plies, &atts), (true, false));
+    }
+
+    #[test]
+    fn only_the_tail_offer_stands_when_both_half_moves_offer() {
+        // Both players attach the flag. Only the tail's signer is the offerer, so
+        // the acceptance belongs to `first` alone — `second` would be accepting
+        // their own offer.
+        let p = rook_params();
+        let plies = [
+            played(1, FIRST, 1, true, RA1A4),
+            played(2, SECOND, 1, true, KE8E7),
+        ];
+        let atts = [att(101, 1, 100), att(102, 2, 200), att(171, REQUEST, 1000)];
+        assert_eq!(acceptances(&p, &plies, &atts), (true, false));
+    }
+
+    #[test]
+    fn an_offer_two_half_moves_back_is_no_longer_standing() {
+        // `first` offers at their step 1; `second` replies; `first` plays on. The
+        // offer is buried in the chain and stands for nobody.
+        let p = rook_params();
+        let plies = [
+            played(1, FIRST, 1, true, RA1A4),
+            played(2, SECOND, 1, false, KE8E7),
+            played(3, FIRST, 2, false, RA4A5),
+        ];
+        let atts = [
+            att(101, 1, 100),
+            att(102, 2, 200),
+            att(103, 3, 300),
+            att(171, REQUEST, 1000),
+        ];
+        assert_eq!(acceptances(&p, &plies, &atts), (false, false));
+    }
+
+    #[test]
+    fn an_offer_on_a_ply_that_lost_its_slot_never_stood() {
+        // `first` publishes two divergent step-1 contents: Ra1-a4 at 100 (no
+        // offer) and Ra1-a5 at 200 WITH one. The informed window binds the
+        // earliest legal candidate, so Ra1-a4 fills the slot and the flag on the
+        // losing alternative is not an offer at all.
+        let p = rook_params();
+        let plies = [
+            played(1, FIRST, 1, false, RA1A4),
+            played(2, FIRST, 1, true, RA1A5),
+        ];
+        let atts = [att(101, 1, 100), att(102, 2, 200), att(171, REQUEST, 1000)];
+        assert_eq!(acceptances(&p, &plies, &atts), (false, false));
+    }
+
+    #[test]
+    fn a_reply_the_selection_skipped_does_not_decline_the_offer() {
+        // `first` offers at their step 1; `second` answers with an ILLEGAL move,
+        // which the two-window rule skips (never a loss, and never a played
+        // half-move). The chain therefore still ends on the offer, and `second`
+        // may still accept it.
+        let p = rook_params();
+        let plies = [
+            played(1, FIRST, 1, true, RA1A4),
+            played(2, SECOND, 1, false, KE8E6),
+        ];
+        let atts = [att(101, 1, 100), att(102, 2, 200), att(171, REQUEST, 1000)];
+        assert_eq!(acceptances(&p, &plies, &atts), (false, true));
+    }
+
+    #[test]
+    fn a_reply_after_the_cutoff_does_not_decline_the_offer() {
+        // `second`'s reply is canonically timed after the cutoff, so it is not
+        // part of the natural state the arbiter rules on: at the cutoff the offer
+        // was still the last half-move, and the invocation accepts it.
+        let p = rook_params();
+        let plies = [
+            played(1, FIRST, 1, true, RA1A4),
+            played(2, SECOND, 1, false, KE8E7),
+        ];
+        let atts = [att(101, 1, 100), att(102, 2, 900), att(171, REQUEST, 500)];
+        assert_eq!(acceptances(&p, &plies, &atts), (false, true));
     }
 }

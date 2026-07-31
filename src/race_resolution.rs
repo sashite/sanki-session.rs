@@ -150,6 +150,25 @@ mod tests {
         Attestation::new(eid(id), pk(signer), eid(attests), ts(at))
     }
 
+    /// Every permutation of `items`, i.e. every order in which a caller might
+    /// supply the same event set. Race resolution is a pure function of that
+    /// set, so all of them must yield the same canonical event.
+    fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
+        if items.len() <= 1 {
+            return vec![items.to_vec()];
+        }
+        let mut orders = Vec::new();
+        for index in 0..items.len() {
+            let mut rest = items.to_vec();
+            let head = rest.remove(index);
+            for mut order in permutations(&rest) {
+                order.insert(0, head.clone());
+                orders.push(order);
+            }
+        }
+        orders
+    }
+
     #[test]
     fn meta_resolution_smallest_created_at() {
         let atts = vec![att(1, TIMESTAMPER, 50, 1000), att(2, TIMESTAMPER, 50, 900)];
@@ -175,6 +194,169 @@ mod tests {
     fn meta_resolution_ignores_other_attested_event() {
         let atts = vec![att(1, TIMESTAMPER, 51, 100)]; // attests 51, not 50
         assert!(canonical_attestation(&atts, eid(50), pk(TIMESTAMPER)).is_none());
+        // And it cannot win the meta-resolution by being earlier: the `e`-tag
+        // scope is a filter, not a ranking input (kind 1041 §Attested event).
+        let atts = vec![att(1, TIMESTAMPER, 51, 100), att(2, TIMESTAMPER, 50, 900)];
+        assert_eq!(
+            canonical_timing(&atts, eid(50), ts(0), Some(pk(TIMESTAMPER))),
+            Some(ts(900))
+        );
+    }
+
+    #[test]
+    fn a_strangers_attestation_can_never_move_a_timing() {
+        // Anyone may publish a kind-1041 naming any event; only the session's
+        // DESIGNATED timestamper is authoritative (nostr-integration §Timing).
+        // A forged attestation must therefore be inert whichever way it leans —
+        // it must neither pull a timing earlier (which would fake a premove or
+        // beat an honest race), nor push it later (which would fake a timeout).
+        let earlier = vec![att(1, TIMESTAMPER, 50, 1000), att(2, 7, 50, 100)];
+        assert_eq!(
+            canonical_timing(&earlier, eid(50), ts(0), Some(pk(TIMESTAMPER))),
+            Some(ts(1000))
+        );
+        let later = vec![att(1, TIMESTAMPER, 50, 1000), att(2, 7, 50, 5000)];
+        assert_eq!(
+            canonical_timing(&later, eid(50), ts(0), Some(pk(TIMESTAMPER))),
+            Some(ts(1000))
+        );
+        // Nor may a stranger win the id tiebreak at an equal `created_at`: the
+        // designated attestation id 9 keeps the slot against the smaller id 1.
+        let tied = vec![att(9, TIMESTAMPER, 50, 1000), att(1, 7, 50, 1000)];
+        let canonical =
+            canonical_attestation(&tied, eid(50), pk(TIMESTAMPER)).expect("the designated one");
+        assert_eq!(*canonical.id.as_bytes(), [9; 32]);
+        // With no designated attestation at all, a crowd of strangers still
+        // leaves the event pending — it never becomes self-timed by default.
+        let strangers = vec![att(1, 7, 50, 100), att(2, 8, 50, 200)];
+        assert_eq!(
+            canonical_timing(&strangers, eid(50), ts(4242), Some(pk(TIMESTAMPER))),
+            None
+        );
+    }
+
+    #[test]
+    fn slot_selection_ignores_a_strangers_attestation() {
+        // The same forgery at slot level: Ply 20 is genuinely attested @2000 and
+        // loses to Ply 10 @1000. A stranger attesting Ply 20 @1 must not flip
+        // the slot — nor contribute the winner's reported timing.
+        let plies = [ply(10, 1, 1), ply(20, 1, 1)];
+        let atts = vec![
+            att(100, TIMESTAMPER, 10, 1000),
+            att(101, TIMESTAMPER, 20, 2000),
+            att(102, 7, 20, 1), // forged
+        ];
+        let canonical =
+            canonical_ply(plies.iter(), &atts, Some(pk(TIMESTAMPER))).expect("a candidate");
+        assert_eq!(*canonical.ply.id.as_bytes(), [10; 32]);
+        assert_eq!(canonical.at, ts(1000));
+    }
+
+    #[test]
+    fn attested_timing_ignores_the_events_own_created_at() {
+        // In attested mode a suite event's own `created_at` is the signer's
+        // self-claim and never drives timing (kind 6423 §Time accounting): the
+        // resolved timing is the attestation's, whatever the event claims.
+        let atts = vec![att(1, TIMESTAMPER, 50, 900)];
+        for claimed in [0, 123_456, -7] {
+            assert_eq!(
+                canonical_timing(&atts, eid(50), ts(claimed), Some(pk(TIMESTAMPER))),
+                Some(ts(900)),
+                "self-claim {claimed} leaked into the attested timing"
+            );
+        }
+    }
+
+    #[test]
+    fn self_timed_never_consults_attestations() {
+        // Self-timed mode designates no timestamper, so attestation is a dormant
+        // capability: kind-1041 events addressed to the session are inert, even
+        // ones that would change the answer if they were consulted.
+        let atts = vec![att(1, TIMESTAMPER, 50, 1), att(2, 7, 50, 2)];
+        assert_eq!(
+            canonical_timing(&atts, eid(50), ts(1234), None),
+            Some(ts(1234))
+        );
+        // At slot level too: Ply 20's own `created_at` (900) wins over Ply 10's
+        // (1000) even though the attestations claim the opposite order.
+        let plies = [ply_at(10, 1, 1, 1000), ply_at(20, 1, 1, 900)];
+        let atts = vec![
+            att(100, TIMESTAMPER, 10, 1),
+            att(101, TIMESTAMPER, 20, 9999),
+        ];
+        let canonical = canonical_ply(plies.iter(), &atts, None).expect("self-timed candidate");
+        assert_eq!(*canonical.ply.id.as_bytes(), [20; 32]);
+        assert_eq!(canonical.at, ts(900));
+    }
+
+    #[test]
+    fn race_resolution_is_independent_of_the_input_order() {
+        // Determinism (README §Design guarantees): the canonical event is a pure
+        // function of the event SET. A `min_by_key` whose key dropped the id
+        // tiebreak would return whichever tied element the caller happened to
+        // list first, and would surface only here.
+        //
+        // Attestations 1 and 2 tie at 100; 3 is a stranger's, 4 attests another
+        // event, 5 is a later one from the timestamper. The canonical is id 1.
+        let atts = [
+            att(1, TIMESTAMPER, 50, 100),
+            att(2, TIMESTAMPER, 50, 100),
+            att(3, 7, 50, 1),
+            att(4, TIMESTAMPER, 51, 1),
+            att(5, TIMESTAMPER, 50, 200),
+        ];
+        for order in permutations(&atts) {
+            let canonical =
+                canonical_attestation(&order, eid(50), pk(TIMESTAMPER)).expect("a conforming one");
+            assert_eq!(*canonical.id.as_bytes(), [1; 32]);
+            assert_eq!(canonical.created_at, ts(100));
+        }
+
+        // Slot selection likewise, over both the Plies' and the attestations'
+        // orders: Plies 10 and 20 tie at 7, so the smallest Ply id wins.
+        let plies = [ply(10, 1, 1), ply(20, 1, 1), ply(30, 1, 1)];
+        let slot_atts = [
+            att(100, TIMESTAMPER, 10, 7),
+            att(101, TIMESTAMPER, 20, 7),
+            att(102, TIMESTAMPER, 30, 9),
+        ];
+        for ply_order in permutations(&plies) {
+            for att_order in permutations(&slot_atts) {
+                let canonical = canonical_ply(ply_order.iter(), &att_order, Some(pk(TIMESTAMPER)))
+                    .expect("a candidate");
+                assert_eq!(*canonical.ply.id.as_bytes(), [10; 32]);
+                assert_eq!(canonical.at, ts(7));
+            }
+        }
+    }
+
+    #[test]
+    fn extreme_timings_are_compared_not_saturated() {
+        // Nostr `created_at` is an integer Unix second and `Timestamp` wraps a
+        // signed `i64`, so pre-epoch and extremal instants are representable.
+        // Race resolution only ever compares them — there is no arithmetic to
+        // saturate or wrap — so the extremes rank normally.
+        let floor = vec![
+            att(1, TIMESTAMPER, 50, i64::MIN),
+            att(2, TIMESTAMPER, 50, 0),
+        ];
+        assert_eq!(
+            canonical_timing(&floor, eid(50), ts(0), Some(pk(TIMESTAMPER))),
+            Some(ts(i64::MIN))
+        );
+        let ceiling = vec![att(1, TIMESTAMPER, 50, i64::MAX)];
+        assert_eq!(
+            canonical_timing(&ceiling, eid(50), ts(0), Some(pk(TIMESTAMPER))),
+            Some(ts(i64::MAX))
+        );
+        assert_eq!(
+            canonical_timing(&[], eid(50), ts(i64::MIN), None),
+            Some(ts(i64::MIN))
+        );
+        let plies = [ply_at(10, 1, 1, i64::MAX), ply_at(20, 1, 1, i64::MIN)];
+        let canonical = canonical_ply(plies.iter(), &[], None).expect("self-timed candidate");
+        assert_eq!(*canonical.ply.id.as_bytes(), [20; 32]);
+        assert_eq!(canonical.at, ts(i64::MIN));
     }
 
     #[test]

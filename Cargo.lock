@@ -66,7 +66,7 @@ checksum = "7344dcd33c42046e032b0616065ea4016243fed770eb5854eccf941e8b02169e"
 
 [[package]]
 name = "sashite-sanki-arbiter"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "sashite-sanki-engine",
  "serde",
@@ -75,9 +75,9 @@ dependencies = [
 
 [[package]]
 name = "sashite-sanki-engine"
-version = "0.7.0"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "395c63d0e663166d295c5476f4ad7d23c8ec3959d909695a221d38ae67df22d5"
+checksum = "0ddf96e32a5268022feab16d0d7956bedf45a57ca2e29195e29be9740cfd5303"
 dependencies = [
  "sashite-epin",
  "sashite-feen",

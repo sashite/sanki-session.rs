@@ -1,5 +1,5 @@
 {
-	"version": 7,
+	"version": 8,
 	"category": "scenario",
 	"vectors": [
 		{
@@ -8934,6 +8934,477 @@
 				}
 			],
 			"expectedChain": ["m1", "m2", "p2"],
+			"expectedTermination": null
+		},
+		{
+			"id": "scenario.cross-variant-checkmate-with-an-inert-tray",
+			"note": "the last five half-moves of a real chess(first)-versus-ogi(second) game played out from the standard mixed start. A chess or xiongqi capturer keeps each captured token's ORIGINAL case, so first's Rook fills first's hand with an inert, second-cased tray that NEITHER side may drop; Rc7xc8 then mates a second player whose own hand is empty. An implementation reading droppability from the union of both hands sees a phantom reserve for second and answers ongoing instead of checkmate",
+			"position": "-rnb1k^b1-r/1+f+f+f+f+f1+f/4i3/P5f1/4n3/N6P/+P1+P+P+P+P+P1/1RBQK^BN-R f/ W/j",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["b1", "b7", null],
+					"timedAt": 100
+				},
+				{
+					"id": "m2",
+					"seat": "second",
+					"step": 1,
+					"move": ["e6", "d4", null],
+					"timedAt": 200
+				},
+				{
+					"id": "m3",
+					"seat": "first",
+					"step": 2,
+					"move": ["b7", "c7", null],
+					"timedAt": 300
+				},
+				{
+					"id": "m4",
+					"seat": "second",
+					"step": 2,
+					"move": ["d4", "c3", null],
+					"timedAt": 400
+				},
+				{
+					"id": "m5",
+					"seat": "first",
+					"step": 3,
+					"move": ["c7", "c8", null],
+					"timedAt": 500
+				}
+			],
+			"expectedChain": ["m1", "m2", "m3", "m4", "m5"],
+			"expectedTermination": {
+				"status": "checkmate"
+			}
+		},
+		{
+			"id": "scenario.cross-variant-inert-tray-mate-as-a-premove",
+			"note": "the same inert-tray mate, reached through the ANTERIOR window: first queued the mating Rc7xc8 @350 before second's reply @400, so it is a premove for its slot and the latest-legal-premove rule binds it. The chain still terminates on the mate — the forgiving-premove rule and a cross-variant rule-system ending compose",
+			"position": "-rnb1k^b1-r/1+f+f+f+f+f1+f/4i3/P5f1/4n3/N6P/+P1+P+P+P+P+P1/1RBQK^BN-R f/ W/j",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["b1", "b7", null],
+					"timedAt": 100
+				},
+				{
+					"id": "m2",
+					"seat": "second",
+					"step": 1,
+					"move": ["e6", "d4", null],
+					"timedAt": 200
+				},
+				{
+					"id": "m3",
+					"seat": "first",
+					"step": 2,
+					"move": ["b7", "c7", null],
+					"timedAt": 300
+				},
+				{
+					"id": "pre",
+					"seat": "first",
+					"step": 3,
+					"move": ["c7", "c8", null],
+					"timedAt": 350
+				},
+				{
+					"id": "m4",
+					"seat": "second",
+					"step": 2,
+					"move": ["d4", "c3", null],
+					"timedAt": 400
+				}
+			],
+			"expectedChain": ["m1", "m2", "m3", "m4", "pre"],
+			"expectedTermination": {
+				"status": "checkmate"
+			}
+		},
+		{
+			"id": "scenario.cross-variant-checkmate-by-the-ogi-side",
+			"note": "chess (first) versus ogi (second) from the standard mixed start: 1.g2-g4 e7-e5 2.f2-f3 Id8-h4#, the ogi Princess mating the chess King down the opened diagonal. The mating side has captured nothing, so both hands are empty and the mate rests on the board alone",
+			"position": "-rnbik^bn-r/+f+f+f+f+f+f+f+f/8/8/8/8/+P+P+P+P+P+P+P+P/-RNBQK^BN-R / W/j",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["g2", "g4", null],
+					"timedAt": 100
+				},
+				{
+					"id": "m2",
+					"seat": "second",
+					"step": 1,
+					"move": ["e7", "e5", null],
+					"timedAt": 200
+				},
+				{
+					"id": "m3",
+					"seat": "first",
+					"step": 2,
+					"move": ["f2", "f3", null],
+					"timedAt": 300
+				},
+				{
+					"id": "m4",
+					"seat": "second",
+					"step": 2,
+					"move": ["d8", "h4", null],
+					"timedAt": 400
+				}
+			],
+			"expectedChain": ["m1", "m2", "m3", "m4"],
+			"expectedTermination": {
+				"status": "checkmate"
+			}
+		},
+		{
+			"id": "scenario.cross-variant-capture-converts-into-the-ogi-hand",
+			"note": "ogi (first) versus chess (second): 1.Fd2-d4 d7-d5 2.Fd4xd5. An ogi capturer converts the captured piece to its OWN case, so the chess Pawn enters first's hand as a genuinely droppable ogi Fu — the mirror of the inert tray a chess or xiongqi capturer keeps",
+			"position": "-rnbqk^bn-r/+p+p+p+p+p+p+p+p/8/8/8/8/+F+F+F+F+F+F+F+F/-RNBIK^BN-R / J/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["d2", "d4", null],
+					"timedAt": 100
+				},
+				{
+					"id": "m2",
+					"seat": "second",
+					"step": 1,
+					"move": ["d7", "d5", null],
+					"timedAt": 200
+				},
+				{
+					"id": "m3",
+					"seat": "first",
+					"step": 2,
+					"move": ["d4", "d5", null],
+					"timedAt": 300
+				}
+			],
+			"expectedChain": ["m1", "m2", "m3"],
+			"expectedTermination": null
+		},
+		{
+			"id": "scenario.ogi-drop-against-a-chess-opponent",
+			"note": "the same line continued: 2...Qd8xd5 (the chess Queen recaptures, and a chess capturer keeps the Fu's original case, so second's tray is inert) 3.F*d3 — first drops the Fu it converted two half-moves earlier. The drop mechanic belongs to the ogi side alone, whatever the opponent's variant",
+			"position": "-rnbqk^bn-r/+p+p+p+p+p+p+p+p/8/8/8/8/+F+F+F+F+F+F+F+F/-RNBIK^BN-R / J/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["d2", "d4", null],
+					"timedAt": 100
+				},
+				{
+					"id": "m2",
+					"seat": "second",
+					"step": 1,
+					"move": ["d7", "d5", null],
+					"timedAt": 200
+				},
+				{
+					"id": "m3",
+					"seat": "first",
+					"step": 2,
+					"move": ["d4", "d5", null],
+					"timedAt": 300
+				},
+				{
+					"id": "m4",
+					"seat": "second",
+					"step": 2,
+					"move": ["d8", "d5", null],
+					"timedAt": 400
+				},
+				{
+					"id": "m5",
+					"seat": "first",
+					"step": 3,
+					"move": [null, "d3", "fu"],
+					"timedAt": 500
+				}
+			],
+			"expectedChain": ["m1", "m2", "m3", "m4", "m5"],
+			"expectedTermination": null
+		},
+		{
+			"id": "scenario.cross-variant-uchifuzume-drop-is-skipped",
+			"note": "ogi (first) versus chess (second): both step-1 candidates are live (at/after t0). The earlier F*h7 @100 would deliver checkmate by a Fu drop — uchifuzume, illegal whatever the mated side's variant — so it is skipped, and the informed window's next candidate, the quiet F*g2 @200, binds. An illegal Ply is skipped, never a loss",
+			"position": "7k^/8/5N2/8/8/8/8/4K^1R1 F/ J/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "mate",
+					"seat": "first",
+					"step": 1,
+					"move": [null, "h7", "fu"],
+					"timedAt": 100
+				},
+				{
+					"id": "quiet",
+					"seat": "first",
+					"step": 1,
+					"move": [null, "g2", "fu"],
+					"timedAt": 200
+				}
+			],
+			"expectedChain": ["quiet"],
+			"expectedTermination": null
+		},
+		{
+			"id": "scenario.xiongqi-checkmate",
+			"note": "xiongqi versus xiongqi from the standard xiongqi start: 1.Ed1-c3 Ng8-f6 2.Ec3xc7#, the Empress mating the General. A xiongqi capturer keeps the captured Soldier's original case, so first's tray is inert",
+			"position": "-rnbeg^bn-r/+s+s+s+s+s+s+s+s/8/8/8/8/+S+S+S+S+S+S+S+S/-RNBEG^BN-R / C/c",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["d1", "c3", null],
+					"timedAt": 100
+				},
+				{
+					"id": "m2",
+					"seat": "second",
+					"step": 1,
+					"move": ["g8", "f6", null],
+					"timedAt": 200
+				},
+				{
+					"id": "m3",
+					"seat": "first",
+					"step": 2,
+					"move": ["c3", "c7", null],
+					"timedAt": 300
+				}
+			],
+			"expectedChain": ["m1", "m2", "m3"],
+			"expectedTermination": {
+				"status": "checkmate"
+			}
+		},
+		{
+			"id": "scenario.xiongqi-versus-ogi-checkmate",
+			"note": "xiongqi (first) versus ogi (second): 1.Ng1-h3 Id8-c6 2.Sf2-f3 Ic6xf3#, the ogi Princess mating the xiongqi General. The captured Soldier converts to second's own case (an ogi capturer), and the mate makes the new reserve moot",
+			"position": "-rnbik^bn-r/+f+f+f+f+f+f+f+f/8/8/8/8/+S+S+S+S+S+S+S+S/-RNBEG^BN-R / C/j",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["g1", "h3", null],
+					"timedAt": 100
+				},
+				{
+					"id": "m2",
+					"seat": "second",
+					"step": 1,
+					"move": ["d8", "c6", null],
+					"timedAt": 200
+				},
+				{
+					"id": "m3",
+					"seat": "first",
+					"step": 2,
+					"move": ["f2", "f3", null],
+					"timedAt": 300
+				},
+				{
+					"id": "m4",
+					"seat": "second",
+					"step": 2,
+					"move": ["c6", "f3", null],
+					"timedAt": 400
+				}
+			],
+			"expectedChain": ["m1", "m2", "m3", "m4"],
+			"expectedTermination": {
+				"status": "checkmate"
+			}
+		},
+		{
+			"id": "scenario.ogi-versus-xiongqi-checkmate",
+			"note": "ogi (first) versus xiongqi (second): 1.Nb1-a3 Nb8-c6 2.Na3-b5 Nc6-b8 3.Nb5xc7#, the ogi Knight mating the xiongqi General",
+			"position": "-rnbeg^bn-r/+s+s+s+s+s+s+s+s/8/8/8/8/+F+F+F+F+F+F+F+F/-RNBIK^BN-R / J/c",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["b1", "a3", null],
+					"timedAt": 100
+				},
+				{
+					"id": "m2",
+					"seat": "second",
+					"step": 1,
+					"move": ["b8", "c6", null],
+					"timedAt": 200
+				},
+				{
+					"id": "m3",
+					"seat": "first",
+					"step": 2,
+					"move": ["a3", "b5", null],
+					"timedAt": 300
+				},
+				{
+					"id": "m4",
+					"seat": "second",
+					"step": 2,
+					"move": ["c6", "b8", null],
+					"timedAt": 400
+				},
+				{
+					"id": "m5",
+					"seat": "first",
+					"step": 3,
+					"move": ["b5", "c7", null],
+					"timedAt": 500
+				}
+			],
+			"expectedChain": ["m1", "m2", "m3", "m4", "m5"],
+			"expectedTermination": {
+				"status": "checkmate"
+			}
+		},
+		{
+			"id": "scenario.chess-versus-xiongqi-checkmate",
+			"note": "chess (first) versus xiongqi (second): 1.Nb1-a3 b7-b5 2.Na3xb5 f7-f6 3.Nb5xc7#, the chess Knight mating the xiongqi General; both captures leave second-cased tokens in first's inert tray",
+			"position": "-rnbeg^bn-r/+s+s+s+s+s+s+s+s/8/8/8/8/+P+P+P+P+P+P+P+P/-RNBQK^BN-R / W/c",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["b1", "a3", null],
+					"timedAt": 100
+				},
+				{
+					"id": "m2",
+					"seat": "second",
+					"step": 1,
+					"move": ["b7", "b5", null],
+					"timedAt": 200
+				},
+				{
+					"id": "m3",
+					"seat": "first",
+					"step": 2,
+					"move": ["a3", "b5", null],
+					"timedAt": 300
+				},
+				{
+					"id": "m4",
+					"seat": "second",
+					"step": 2,
+					"move": ["f7", "f6", null],
+					"timedAt": 400
+				},
+				{
+					"id": "m5",
+					"seat": "first",
+					"step": 3,
+					"move": ["b5", "c7", null],
+					"timedAt": 500
+				}
+			],
+			"expectedChain": ["m1", "m2", "m3", "m4", "m5"],
+			"expectedTermination": {
+				"status": "checkmate"
+			}
+		},
+		{
+			"id": "scenario.xiongqi-sideways-en-passant-against-a-chess-pawn",
+			"note": "xiongqi (first) versus chess (second): the Soldier walks a2-a4-a5-a6, crossing the river, and answers b7-b5 with a6xb6 — the SIDEWAYS en passant only a Soldier past the river has (the chess Pawn captures diagonally, the ogi Fu never captures en passant). The victim is the diminished pawn on b5, one rank beyond the skipped square",
+			"position": "-rnbqk^bn-r/+p+p+p+p+p+p+p+p/8/8/8/8/+S+S+S+S+S+S+S+S/-RNBEG^BN-R / C/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a2", "a4", null],
+					"timedAt": 100
+				},
+				{
+					"id": "m2",
+					"seat": "second",
+					"step": 1,
+					"move": ["g8", "f6", null],
+					"timedAt": 200
+				},
+				{
+					"id": "m3",
+					"seat": "first",
+					"step": 2,
+					"move": ["a4", "a5", null],
+					"timedAt": 300
+				},
+				{
+					"id": "m4",
+					"seat": "second",
+					"step": 2,
+					"move": ["f6", "g8", null],
+					"timedAt": 400
+				},
+				{
+					"id": "m5",
+					"seat": "first",
+					"step": 3,
+					"move": ["a5", "a6", null],
+					"timedAt": 500
+				},
+				{
+					"id": "m6",
+					"seat": "second",
+					"step": 3,
+					"move": ["b7", "b5", null],
+					"timedAt": 600
+				},
+				{
+					"id": "m7",
+					"seat": "first",
+					"step": 4,
+					"move": ["a6", "b6", null],
+					"timedAt": 700
+				}
+			],
+			"expectedChain": ["m1", "m2", "m3", "m4", "m5", "m6", "m7"],
 			"expectedTermination": null
 		}
 	]
