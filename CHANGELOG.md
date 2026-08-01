@@ -4,6 +4,32 @@ All notable changes to this crate are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] — 2026-08-01
+
+`sashite-sanki-engine` bumped to 0.9, which carries the whole notation stack
+with it. **No adjudication changes**: every verdict, every selection and every
+conformance vector is unchanged, and the two corpora (36 scenarios, selection)
+pass byte for byte as before.
+
+### Changed
+
+- **`sashite-sanki-engine` 0.8 → 0.9.** The engine moved onto `sashite-feen`
+  0.2 and `sashite-qi` 0.2, and hardened `Position::new`, which now rejects any
+  board that is not 8×8 with a new `PositionError::NotSankiBoard` variant.
+  `sashite-sin`, `sashite-pin` and `sashite-epin` reach 1.1 in the lockfile.
+
+  Nothing in this crate constructs a `Position` from a `Qi` — positions arrive
+  through `Position::parse`, which already rejected foreign geometries — so the
+  engine's stricter constructor changes no behaviour here. What does reach this
+  crate is `Position::to_feen` now resting on a guaranteed invariant rather than
+  an unchecked assumption, and FEEN's encoder no longer being able to emit a
+  string its own parser would reject.
+
+  This is a minor bump rather than a patch because `Session::initial_position`
+  returns an `&sashite_sanki_engine::Position`, so the engine's own breaking
+  change is visible in this crate's public API: dependents must move to engine
+  0.9 as well.
+
 ## [0.11.0] — 2026-07-31
 
 `sashite-sanki-engine` bumped to 0.8, and a reliability review of the whole
