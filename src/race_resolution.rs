@@ -17,7 +17,7 @@
 //!   no canonical timing (attested mode, no conforming attestation) is excluded
 //!   (it is *pending*); in self-timed mode every Ply has timing.
 //!
-//! The greedy matching of Pairings (kind `6419`) is a founding-time concern,
+//! The greedy matching of Pairings (kind `3419`) is a founding-time concern,
 //! outside per-session adjudication, and is not implemented here.
 
 use crate::event::{Attestation, EventId, Ply, PublicKey};
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn attested_timing_ignores_the_events_own_created_at() {
         // In attested mode a suite event's own `created_at` is the signer's
-        // self-claim and never drives timing (kind 6423 §Time accounting): the
+        // self-claim and never drives timing (kind 3423 §Time accounting): the
         // resolved timing is the attestation's, whatever the event claims.
         let atts = vec![att(1, TIMESTAMPER, 50, 900)];
         for claimed in [0, 123_456, -7] {

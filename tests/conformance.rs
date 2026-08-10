@@ -141,7 +141,7 @@ struct ScenarioVector {
     t0: i64,
     cutoff: i64,
     /// The session's time control (v5): `[duration, increment, plies]` period
-    /// triples in kind-6420 order. Absent -> a neutral control that never flags,
+    /// triples in kind-3420 order. Absent -> a neutral control that never flags,
     /// so the vector pins selection only.
     #[serde(rename = "timeControl", default)]
     time_control: Option<Vec<PeriodTriple>>,
@@ -159,7 +159,7 @@ struct ScenarioTermination {
     status: String,
 }
 
-/// A v5 `timeControl` period: `[duration, increment, plies]` (kind-6420 order).
+/// A v5 `timeControl` period: `[duration, increment, plies]` (kind-3420 order).
 type PeriodTriple = (u64, Option<u64>, Option<u32>);
 
 #[derive(serde::Deserialize)]

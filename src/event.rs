@@ -4,17 +4,17 @@
 //! signature-verified (NIP-01), and parsed from their raw tag form. This module
 //! gives those events a typed shape reduced to what arbitration needs:
 //!
-//! - [`Ply`] (kind `6423`) — a played half-move: its `step`, signer, optional
+//! - [`Ply`] (kind `3423`) — a played half-move: its `step`, signer, optional
 //!   `draw` flag, and opaque `content` (decoded later by the kernel);
 //! - [`Attestation`] (kind `1041`) — the designated timestamper's receipt
 //!   witness, carrying the **canonical timing** of the attested event;
-//! - [`AdjudicationRequest`] (kind `6424`) — a player's invocation of the
+//! - [`AdjudicationRequest`] (kind `3424`) — a player's invocation of the
 //!   arbiter.
 //!
 //! Timing depends on the session's mode. A suite event's own `created_at` is the
 //! signer's self-claim. When the session designates a timestamper (attested
 //! mode), that self-claim is superseded by the [`Attestation`]'s `created_at`
-//! and never drives race resolution (kind `6423` §Time accounting; kind `6424`
+//! and never drives race resolution (kind `3423` §Time accounting; kind `3424`
 //! §Invocation timing). When the session is self-timed — no timestamper, the
 //! default — there is no attestation, and the relay-enforced `created_at` IS the
 //! canonical timing (nostr-integration §Timing). [`Ply`] and
@@ -121,7 +121,7 @@ fn write_hex(f: &mut core::fmt::Formatter<'_>, bytes: &[u8; 32]) -> core::fmt::R
     Ok(())
 }
 
-/// A played half-move (kind `6423`).
+/// A played half-move (kind `3423`).
 ///
 /// `content` is the opaque move encoding; its syntax and legality are the
 /// kernel's concern, not this model's. `created_at` is the event's relay-enforced
@@ -133,9 +133,9 @@ pub struct Ply {
     pub id: EventId,
     /// The moving player's pubkey.
     pub signer: PublicKey,
-    /// The referenced Game Session (kind `6422`).
+    /// The referenced Game Session (kind `3422`).
     pub session: EventId,
-    /// The signer's own move ordinal (`>= 1`), per kind `6423` §Step semantics
+    /// The signer's own move ordinal (`>= 1`), per kind `3423` §Step semantics
     /// and play order: each player numbers their own moves independently, and
     /// the slot of a Ply is `(session, signer, step)`.
     pub step: u32,
@@ -209,7 +209,7 @@ impl Attestation {
     }
 }
 
-/// An Adjudication Request (kind `6424`): a player's invocation of the arbiter.
+/// An Adjudication Request (kind `3424`): a player's invocation of the arbiter.
 ///
 /// Carries no claims — the arbiter rules on the natural state of events. The
 /// request's authoritative timing is its [`Attestation`]'s `created_at` in
@@ -220,7 +220,7 @@ pub struct AdjudicationRequest {
     pub id: EventId,
     /// The invoking player's pubkey.
     pub signer: PublicKey,
-    /// The referenced Game Session (kind `6422`).
+    /// The referenced Game Session (kind `3422`).
     pub session: EventId,
     /// The designated arbiter named by the request's `p` tag.
     pub arbiter: PublicKey,

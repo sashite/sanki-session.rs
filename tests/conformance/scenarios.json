@@ -255,7 +255,7 @@
 		},
 		{
 			"id": "scenario.pre-t0-ply-is-ignored",
-			"note": "t0 = 100: a ply canonically timed @50 — before the session's canonical start — is invalid and never a candidate (kind 6423 §Time accounting; 6425 §Natural state condition 4). Without the bound it would be first's latest legal premove and steal the slot from m1",
+			"note": "t0 = 100: a ply canonically timed @50 — before the session's canonical start — is invalid and never a candidate (kind 3423 §Time accounting; 3425 §Natural state condition 4). Without the bound it would be first's latest legal premove and steal the slot from m1",
 			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
 			"t0": 100,
 			"cutoff": 1000,

@@ -1,4 +1,4 @@
-//! The natural state of events at adjudication (kind `6425` §Natural state).
+//! The natural state of events at adjudication (kind `3425` §Natural state).
 //!
 //! When the arbiter rules, it replays the session's play order from its first
 //! half-move, selecting the canonical Ply for each successive slot under the
@@ -10,13 +10,13 @@
 //! For each play-order position (`(signer, step)` under Sanki's strict
 //! alternation), the candidates are the Plies for that slot whose canonical
 //! timing lies in `[t₀, cutoff]` — `t₀` the session start (a Ply timed before
-//! t₀ is invalid, kind `6423` §Time accounting, and never enters a slot —
+//! t₀ is invalid, kind `3423` §Time accounting, and never enters a slot —
 //! deciders' confirmation of 2026-07-19), the `cutoff` the
 //! triggering Request's canonical timing (so a player cannot race the arbiter by
 //! playing after invoking). Identical-content re-submissions are idempotent
 //! retries, not alternatives: per content, only the **race-canonical
 //! representative** (smallest canonical timing, then smallest event id — kind
-//! `6423` §Race resolution) enters the two-window selection, so duplicates
+//! `3423` §Race resolution) enters the two-window selection, so duplicates
 //! neither shift the selected timing nor consume cap slots. Legality is probed
 //! **lazily** through [`select_candidate`]'s callback, on the capped windows
 //! only (≤ 2K full-rule probes per slot). Canonical timing is the designated timestamper's
@@ -160,7 +160,7 @@ pub fn natural_state<'a>(
         let step_no = params.step_at(half_move);
 
         // Candidates for this slot: canonically timed within [t₀, cutoff] (a
-        // pre-t₀ Ply is invalid and never enters — kind 6423 §Time accounting).
+        // pre-t₀ Ply is invalid and never enters — kind 3423 §Time accounting).
         let timed: Vec<SlotCandidate<'a>> = plies
             .iter()
             .filter(|ply| ply.session == session && ply.signer == signer && ply.step == step_no)
@@ -179,7 +179,7 @@ pub fn natural_state<'a>(
         // Identical-content re-submissions collapse to their race-canonical
         // representative — smallest (canonical timing, event id) — before the
         // two-window rule (Move Encoding — Sanki §Slot candidates and
-        // selection; kind 6423 §Race resolution).
+        // selection; kind 3423 §Race resolution).
         let mut representatives: BTreeMap<&str, SlotCandidate<'a>> = BTreeMap::new();
         for entrant in timed {
             match representatives.entry(entrant.ply.content.as_str()) {
@@ -619,7 +619,7 @@ mod tests {
 
     #[test]
     fn pre_t0_candidates_are_ignored() {
-        // A Ply timed before t₀ is invalid (kind 6423 §Time accounting) and
+        // A Ply timed before t₀ is invalid (kind 3423 §Time accounting) and
         // never enters its slot — deciders' confirmation of 2026-07-19.
         let plies = [ply(1, FIRST, 1, RA1A4)];
         let atts = [att(101, 1, -5), cutoff_att(1000)];
@@ -658,8 +658,8 @@ mod tests {
     fn the_play_order_model_presumes_a_first_to_move_founding_position() {
         // A PRECONDITION, pinned rather than enforced. The replay maps
         // play-order position 1 to `(first, step 1)` under Sanki's strict
-        // alternation (kind `6423` §Step semantics and play order), so the
-        // founding position of kind `6422` must have `first` on move — as the
+        // alternation (kind `3423` §Step semantics and play order), so the
+        // founding position of kind `3422` must have `first` on move — as the
         // standard starting positions of all three variants do. `SessionParams`
         // is documented as assembled *after* cross-event validation, and this
         // module does not re-derive the turn from the position.
@@ -710,7 +710,7 @@ mod tests {
         // turn a played game into an unfinished one.
         //
         // The table below covers **all nine variant pairings** of the Sanki
-        // suite (kind `6422` fixes the per-player variants through the initial
+        // suite (kind `3422` fixes the per-player variants through the initial
         // position's styles) and every move shape only some of them have:
         // castling in chess, ōgi and xiongqi alike (deciders' ruling
         // 2026-07-27, `rules-of-ogi.md` / `rules-of-xiongqi.md` §Castling);
@@ -1390,7 +1390,7 @@ mod tests {
     /// the acceptance rules `agreement`.
     ///
     /// Whether an offer attached to a re-submitted move ought to survive is a
-    /// normative question about kind 6423 §Race resolution, not something to
+    /// normative question about kind 3423 §Race resolution, not something to
     /// settle by changing the key here: `natural_state` is one of two
     /// implementations gated by the same corpus.
     #[test]

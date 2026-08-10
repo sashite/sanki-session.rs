@@ -4,10 +4,10 @@
 //! the application assembles them, after cross-event validation, into one
 //! aggregate:
 //!
-//! - from the **Game Session** (kind `6422`): the two players and their sides,
+//! - from the **Game Session** (kind `3422`): the two players and their sides,
 //!   the per-player variants (carried by the initial position's styles), the
 //!   initial position, the arbiter (its signer), and the session's event id;
-//! - from the **founding** (kinds `6420`/`6421` or `6418`/`6419`): the time
+//! - from the **founding** (kinds `3420`/`3421` or `3418`/`3419`): the time
 //!   control and the OPTIONAL designated timestamper (absent → the session is
 //!   self-timed, its canonical timing being the events' own relay-enforced
 //!   `created_at`; attestation is a dormant capability);
@@ -19,7 +19,7 @@
 //! mapping a signer to its side, naming the player on a side, recognizing the
 //! timestamper, and mapping a **play-order position** (1-based half-move index)
 //! to its slot — the side on move and that side's `step` (the signer's own move
-//! ordinal, kind `6423` §Step semantics and play order) — under Sanki's strict
+//! ordinal, kind `3423` §Step semantics and play order) — under Sanki's strict
 //! alternation. The per-player variants are not duplicated here — they are read
 //! from the [`Position`] (its style field), via [`SessionParams::initial_state`]
 //! and the kernel.
@@ -166,7 +166,7 @@ impl SessionParams {
     /// A pure function of the position — it reads neither the board nor the
     /// session's history — and total over `u32`: the parity is exact at both
     /// ends of the range, so nothing saturates. It presupposes what the Game
-    /// Session (kind `6422`) supplies, an **initial position with `first` to
+    /// Session (kind `3422`) supplies, an **initial position with `first` to
     /// move**; the engine's own turn tracking then stays in lockstep with it
     /// half-move for half-move (pinned by `verdict`'s
     /// `the_engine_turn_tracks_the_arbiter_play_order`). `half_move` is 1-based:
@@ -181,7 +181,7 @@ impl SessionParams {
         }
     }
 
-    /// The mover's `step` — their own move ordinal (kind `6423` §Step semantics
+    /// The mover's `step` — their own move ordinal (kind `3423` §Step semantics
     /// and play order) — at the 1-based position `half_move` of the play order:
     /// position 1 → step 1 of `first`, position 2 → step 1 of `second`,
     /// position 3 → step 2 of `first`, …
@@ -353,14 +353,14 @@ mod tests {
 
         // Position 0 is outside the 1-based domain: it is answered without
         // panicking or wrapping, and names a `step` no conforming Ply can carry
-        // (kind `6423` §Step semantics: `step >= 1`), so it can match nothing.
+        // (kind `3423` §Step semantics: `step >= 1`), so it can match nothing.
         assert_eq!(p.step_at(0), 0);
     }
 
     #[test]
     fn side_of_maps_only_the_two_players() {
         // The `None` here is the gate that keeps a non-player's Adjudication
-        // Request from resolving as a resignation (kind `6424` §Semantic
+        // Request from resolving as a resignation (kind `3424` §Semantic
         // constraints, item 3), so it must not be approximate: only the two exact
         // 32-byte player keys map.
         let p = params();
@@ -391,7 +391,7 @@ mod tests {
     #[test]
     fn initial_kernel_state_starts_in_the_first_period() {
         // The kernel clocks start symmetric on the FIRST period of a multi-period
-        // control (kind `6420` §time_control); the later periods are reached by
+        // control (kind `3420` §time_control); the later periods are reached by
         // ticking, never at the start.
         let main = Period::new(Duration::from_secs(900), None, None).expect("valid period");
         let overtime = Period::new(

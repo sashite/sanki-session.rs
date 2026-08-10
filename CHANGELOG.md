@@ -4,6 +4,25 @@ All notable changes to this crate are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Documentation only — the suite's kind numbers moved out of NIP-90's reserved range.** Every reference in the doc comments, the README and the conformance notes now reads `3418`–`3441` instead of `6418`–`6441`.
+
+  This crate holds no kind constant: it reasons about sessions, plies and verdicts
+  as data, and names their kinds only to say what it is reasoning about. So
+  **nothing here behaves differently**, and a consumer on either numbering links
+  against it unchanged — which is also why this is not worth a release of its own.
+  It rides along with the next substantive one; until then a reader of the
+  published docs sees the old numbers.
+
+  [NIP-90](https://github.com/nostr-protocol/nips/blob/master/90.md) reserves
+  `5000-7000` in one block and pairs a job request with its result at a fixed
+  offset of a thousand, so a Game Session at `6422` *was* the result of job
+  request `5422` to anything that knows NIP-90 (`web-specs.md` README §Kind
+  numbers). 128 tests pass unchanged.
+
 ## [0.12.0] — 2026-08-01
 
 `sashite-sanki-engine` bumped to 0.9, which carries the whole notation stack

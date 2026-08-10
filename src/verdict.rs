@@ -1,7 +1,7 @@
 //! Adjudication assembly and the top-level [`adjudicate`] orchestration.
 //!
 //! [`adjudicate`] turns a session's public events into the arbiter's binding
-//! verdict (kind `6425`), per Statuses — Sanki §Verdict resolution: a
+//! verdict (kind `3425`), per Statuses — Sanki §Verdict resolution: a
 //! termination [`Status`] (the event's `content`) and a result distribution
 //! ([`Outcome3`], the `result` tags). It composes every layer below it.
 //!
@@ -28,7 +28,7 @@
 //! from a session player **always yields a verdict**. [`adjudicate`] returns
 //! `None` only when the Request is non-conforming — it does not reference this
 //! session and this arbiter, or its signer is not a session player (kind
-//! `6424` §Semantic constraints, items 2–4) — or when it has no canonical
+//! `3424` §Semantic constraints, items 2–4) — or when it has no canonical
 //! timing yet (the cutoff is undefined).
 //!
 //! Several Requests may coexist, and the choice of which to rule on fixes the
@@ -98,7 +98,7 @@ impl Adjudication {
 /// Request's canonical timing.
 ///
 /// Returns `None` when no ruling is possible: the Request is non-conforming
-/// (another session or arbiter, or a non-player signer — kind `6424` §Semantic
+/// (another session or arbiter, or a non-player signer — kind `3424` §Semantic
 /// constraints, items 2–4), or it has no canonical timing yet.
 #[must_use]
 pub fn adjudicate(
@@ -108,13 +108,13 @@ pub fn adjudicate(
     request: &AdjudicationRequest,
 ) -> Option<Adjudication> {
     // A Request for another session or another arbiter is non-conforming
-    // (kind 6424 §Semantic constraints, items 2 and 4): no ruling — a
+    // (kind 3424 §Semantic constraints, items 2 and 4): no ruling — a
     // cross-session invocation must never resolve as a resignation here.
     if request.session != params.session() || request.arbiter != params.arbiter() {
         return None;
     }
 
-    // A Request from a non-player is non-conforming (kind 6424 §Semantic
+    // A Request from a non-player is non-conforming (kind 3424 §Semantic
     // constraints, item 3): no ruling.
     let invoker = params.side_of(request.signer)?;
 
@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn cross_session_request_no_verdict() {
-        // A Request referencing another session is non-conforming (kind 6424
+        // A Request referencing another session is non-conforming (kind 3424
         // §Semantic constraints, item 2): no ruling — never a resignation in
         // the wrong session.
         let plies = [ply(1, FIRST, 1, "[\"a1\",\"a4\",null]")];
@@ -666,7 +666,7 @@ mod tests {
     #[test]
     fn abandonment_spends_the_overtime_periods() {
         // A `[600]` main bank followed by a `[0, +30, /1]` overtime: the bank
-        // exhausting rolls the overspend into the next period (kind `6420`
+        // exhausting rolls the overspend into the next period (kind `3420`
         // §time_control), so the flag falls only past 600 + 30. The gate must
         // account the whole control, not the first period alone.
         let main = Period::new(Duration::from_secs(600), None, None).expect("period");

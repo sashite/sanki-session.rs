@@ -20,9 +20,9 @@ and signature verification are the caller's responsibility.
 The arbiter reasons over plain values the caller has already received,
 signature-verified, and parsed — there is no cryptography and no I/O here:
 
-- `Ply` — a move played at a step (the kind-6423 content);
+- `Ply` — a move played at a step (the kind-3423 content);
 - `Attestation` — a timestamper's attestation of an event (kind 1041);
-- `AdjudicationRequest` — a request to rule on a session (kind 6424);
+- `AdjudicationRequest` — a request to rule on a session (kind 3424);
 - `EventId` / `PublicKey` — opaque 32-byte identities.
 
 Timing depends on the session's **mode**: in *attested* mode (a designated
@@ -63,7 +63,7 @@ on a session, cut off at the triggering Request's canonical attestation:
 
 `adjudicate` returns `None` only when the Request is non-conforming — it does
 not reference this session and this arbiter, or its signer is not a session
-player (kind 6424 §Semantic constraints, items 2–4) — or when it has no
+player (kind 3424 §Semantic constraints, items 2–4) — or when it has no
 canonical timing yet. Several Requests may coexist; `select_request` pins the
 deterministic **which Request rules** policy (earliest canonical timing,
 smallest event id as tiebreaker, among conforming timed Requests) — "not yet

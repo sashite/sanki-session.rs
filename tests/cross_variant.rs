@@ -1,7 +1,7 @@
 //! Cross-variant adjudication: the nine pairings driven end to end through
 //! [`adjudicate`] (Statuses — Sanki §Verdict resolution).
 //!
-//! Sanki is a **cross-variant** family: kind `6422` assigns each player a
+//! Sanki is a **cross-variant** family: kind `3422` assigns each player a
 //! variant through the initial position's SIN styles, so chess, ōgi and xiongqi
 //! meet on one 8×8 board in nine possible pairings. Every session below is a
 //! real one — each position was reached by playing legal half-moves through the
@@ -304,7 +304,7 @@ fn inert_tray_checkmate_from_the_standard_mixed_start() {
 
 #[test]
 fn every_pairing_is_adjudicated_end_to_end() {
-    // The nine pairings kind `6422` can assign, each replayed from its published
+    // The nine pairings kind `3422` can assign, each replayed from its published
     // starting position and ruled on. Eight terminate on the board; the
     // chess-second xiongqi session (`C/w`) is still ongoing at the cutoff and
     // resolves through the residual-resignation branch instead, so both arms of
