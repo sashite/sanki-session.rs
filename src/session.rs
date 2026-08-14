@@ -12,7 +12,7 @@
 //!   self-timed, its canonical timing being the events' own relay-enforced
 //!   `created_at`; attestation is a dormant capability);
 //! - from t₀, the canonical session start — the Session Start Attestation (kind
-//!   `1041`) in attested mode, or the Game Session's own `created_at` when
+//!   `3410`) in attested mode, or the Game Session's own `created_at` when
 //!   self-timed.
 //!
 //! This module is a pure aggregate plus the lookups the arbiter layers need:

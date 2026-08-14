@@ -21,7 +21,7 @@ The arbiter reasons over plain values the caller has already received,
 signature-verified, and parsed — there is no cryptography and no I/O here:
 
 - `Ply` — a move played at a step (the kind-3423 content);
-- `Attestation` — a timestamper's attestation of an event (kind 1041);
+- `Attestation` — a timestamper's attestation of an event (kind 3410);
 - `AdjudicationRequest` — a request to rule on a session (kind 3424);
 - `EventId` / `PublicKey` — opaque 32-byte identities.
 

@@ -2,7 +2,7 @@
 //!
 //! Authoritative timing depends on the session's mode (nostr-integration
 //! §Timing). In **attested** mode the timing is the designated timestamper's
-//! Event Timestamp Attestation (kind `1041`); a suite event's own `created_at`
+//! Event Timestamp Attestation (kind `3410`); a suite event's own `created_at`
 //! is ignored. In **self-timed** mode — no timestamper, the default — there is
 //! no attestation, and the event's own relay-enforced `created_at` IS the
 //! canonical timing. [`canonical_timing`] resolves either mode. On top of it:
@@ -195,7 +195,7 @@ mod tests {
         let atts = vec![att(1, TIMESTAMPER, 51, 100)]; // attests 51, not 50
         assert!(canonical_attestation(&atts, eid(50), pk(TIMESTAMPER)).is_none());
         // And it cannot win the meta-resolution by being earlier: the `e`-tag
-        // scope is a filter, not a ranking input (kind 1041 §Attested event).
+        // scope is a filter, not a ranking input (kind 3410 §Attested event).
         let atts = vec![att(1, TIMESTAMPER, 51, 100), att(2, TIMESTAMPER, 50, 900)];
         assert_eq!(
             canonical_timing(&atts, eid(50), ts(0), Some(pk(TIMESTAMPER))),
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn a_strangers_attestation_can_never_move_a_timing() {
-        // Anyone may publish a kind-1041 naming any event; only the session's
+        // Anyone may publish a kind-3410 naming any event; only the session's
         // DESIGNATED timestamper is authoritative (nostr-integration §Timing).
         // A forged attestation must therefore be inert whichever way it leans —
         // it must neither pull a timing earlier (which would fake a premove or
@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn self_timed_never_consults_attestations() {
         // Self-timed mode designates no timestamper, so attestation is a dormant
-        // capability: kind-1041 events addressed to the session are inert, even
+        // capability: kind-3410 events addressed to the session are inert, even
         // ones that would change the answer if they were consulted.
         let atts = vec![att(1, TIMESTAMPER, 50, 1), att(2, 7, 50, 2)];
         assert_eq!(

@@ -6,7 +6,7 @@
 //!
 //! - [`Ply`] (kind `3423`) — a played half-move: its `step`, signer, optional
 //!   `draw` flag, and opaque `content` (decoded later by the kernel);
-//! - [`Attestation`] (kind `1041`) — the designated timestamper's receipt
+//! - [`Attestation`] (kind `3410`) — the designated timestamper's receipt
 //!   witness, carrying the **canonical timing** of the attested event;
 //! - [`AdjudicationRequest`] (kind `3424`) — a player's invocation of the
 //!   arbiter.
@@ -173,7 +173,7 @@ impl Ply {
     }
 }
 
-/// An Event Timestamp Attestation (kind `1041`).
+/// An Event Timestamp Attestation (kind `3410`).
 ///
 /// Authoritative for timing only when `signer` is the session's designated
 /// timestamper; the arbiter applies that restriction. `created_at` is the
