@@ -4,20 +4,27 @@ All notable changes to this crate are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.12.1] — 2026-08-21
+
+A documentation-only patch, promoted to a release by the conformance gate:
+the client's cross-implementation gate (`sanki.app.sveltekit`,
+`conformance/kernels.json`) pins crates.io releases whose embedded corpus is
+byte-identical to the client's, and the kind renumbering below — inert for
+behaviour — touched one conformance note (`scenarios.json`). Re-embedding the
+corpus is the release; no code changes.
 
 ### Changed
 
-- **Documentation only — the Event Timestamp Attestation kind is now `3410` (decision M-14, 2026-08-11).** The README's event model and the `event`, `session` and `race_resolution` doc comments read `3410` instead of the NIP-03-adjacent `1041`. Same nature as the entry below: the `Attestation` type carries no kind constant, **nothing behaves differently**, and the correction rides along with the next substantive release.
+- **Documentation only — the Event Timestamp Attestation kind is now `3410` (decision M-14, 2026-08-11).** The README's event model and the `event`, `session` and `race_resolution` doc comments read `3410` instead of the NIP-03-adjacent `1041`. Same nature as the entry below: the `Attestation` type carries no kind constant, **nothing behaves differently**, and the correction ships with this patch.
 
 - **Documentation only — the suite's kind numbers moved out of NIP-90's reserved range.** Every reference in the doc comments, the README and the conformance notes now reads `3418`–`3441` instead of `6418`–`6441`.
 
   This crate holds no kind constant: it reasons about sessions, plies and verdicts
   as data, and names their kinds only to say what it is reasoning about. So
   **nothing here behaves differently**, and a consumer on either numbering links
-  against it unchanged — which is also why this is not worth a release of its own.
-  It rides along with the next substantive one; until then a reader of the
-  published docs sees the old numbers.
+  against it unchanged. (Written to ride along with the next substantive
+  release; the conformance gate promoted it to this patch instead — see the
+  release note above.)
 
   [NIP-90](https://github.com/nostr-protocol/nips/blob/master/90.md) reserves
   `5000-7000` in one block and pairs a job request with its result at a fixed
