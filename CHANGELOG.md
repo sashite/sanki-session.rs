@@ -4,6 +4,168 @@ All notable changes to this crate are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] — 2026-09-04
+
+A review pass on the 0.13 API and on the normative corners the review found
+unpinned. The replay algorithm is unchanged but for one rule — how identical
+candidates collapse, below — and every verdict of the shared corpus is
+unchanged; what changes is the shape consumers touch, so that pending is
+distinguishable from invalid, the kernel is invoked without fabricating an
+event, the slot cap is the rule-system document's, what the rule system can
+never yield is refused at the boundary rather than evaluated, and an
+inconsistency is reported rather than resolved into a wrong verdict. The
+shared corpus moves to **v9** and now pins the post-chain verdict and the
+session cap too.
+
+### Changed
+
+- **Normative — identical candidates collapse without changing the selection**
+  (*Move Encoding — Sanki* §Slot candidates and selection, revised with this
+  release). Identical candidates — same content **and** same `draw` flag — are
+  one candidate for the cap, represented in each window by the one the
+  window's scan reaches first (the latest-timed anterior, the earliest-timed
+  informed). Before, the collapse was keyed on content alone and kept the
+  earliest-timed twin, which (a) handed a slot to an intermediate premove when
+  a player re-premoved back to an earlier content (X @50, Y @60, X @70 gave
+  Y), and (b) destroyed an offer added by a re-premove of the same move. The
+  corpus vector `scenario.identical-content-retries-collapse` changes
+  accordingly (the later twin represents the pair — a premove charges no clock
+  and moves no anchor, so nothing else does). Identical candidates have
+  identical legality, so the collapse never changes which candidate a
+  window's scan reaches first; its one observable effect is the cap's — a
+  flood of retries can no longer bury a legal candidate, and a pair that
+  differs only by the flag consumes two cap slots. A pair straddling the
+  boundary is two candidates, one per window, whatever the input order; the
+  window split has one definition, `Candidate::is_anterior`, read by the
+  collapse and by `select_candidate` alike.
+- **Normative — a Conclusion timed before t₀ concludes nothing:**
+  `NoVerdict::BeforeStart` (final). Kind `3425` says a player concludes
+  *after* t₀; the crate used to resolve such a Conclusion to its signer's
+  resignation, letting a scheduled session be "concluded" before it was
+  playable. `verdict_at` still answers for any instant a caller probes.
+- **BREAKING — `KernelResult` is `verdict::Verdict`**, a coherent
+  status/outcome pair: `Verdict::new(status, outcome)` returns `None` for a
+  decisive status with a draw or a draw status with a decisive outcome (the
+  result-kind mapping of Statuses — Sanki), so a claim the rule system can
+  never yield is refused where the wire is parsed, not called "wrong" after a
+  replay. `KernelResult::result()` is `Verdict::outcome()`; `score` reads
+  `Outcome3::points` instead of re-deriving it; `verdict()` (the engine-shaped
+  copy) is gone. `Conclusion` carries its claim as one `claim: Verdict` field
+  (replacing `status`/`result` and `claim()`), and `kernel_result` is
+  **`expected_verdict`** — the verdict a Conclusion is expected to claim.
+- **BREAKING — `expected_verdict` returns `Result<Verdict, NoVerdict>`**
+  instead of `Option`. `NoVerdict` names the reason — `OtherSession`,
+  `NotAPlayer`, `BeforeStart` (all final), `Pending` (the one transient
+  reason — `is_transient()`), or `Inconsistent` — so a consumer re-examines
+  a pending Conclusion once timed and ignores an invalid one for good (kind
+  `3425` §Until the Conclusion has canonical timing). Previously all of them
+  collapsed to `None`. The same enum is the error of `verdict_at`, which
+  refuses a cutoff before t₀ (`BeforeStart`) rather than telling a client
+  probing ahead of a scheduled start that it would resign.
+- **BREAKING — `select_conclusion` returns
+  `Result<Option<CanonicalConclusion>, NoVerdict>`**: `Ok(Some)` carries the
+  canonical Conclusion, its `cutoff` and its `verdict` (no second replay
+  needed); `Ok(None)` is an open session; `Err(Inconsistent)` is propagated
+  from any Conclusion in reach — the session is unresolved, and no later
+  Conclusion is promoted around a broken replay (previously the inconsistent
+  one was silently skipped).
+- **BREAKING — `SessionParams::new` takes `Seats` and `start`, and returns
+  `Option`**: `None` when the initial position does not have `first` to move
+  (the play-order model rests on it; such a session had slot 1 unfillable for
+  good and `second` charged from t₀). `Seats::new(first, second)` returns
+  `None` when the two are equal (a swap flips every decisive verdict), and
+  `SessionParams::start()` replaces `anchor()` (t₀, distinct from the
+  per-slot boundary).
+- **BREAKING — the slot cap `K` is a session parameter, at least 1 by type.**
+  `candidate_cap` defaults to the reference document's value (8) and
+  `SessionParams::with_candidate_cap(NonZeroUsize)` sets a session's own —
+  *Move Encoding — Sanki* §Bounding makes it a parameter of the rule-system
+  document, so a session founded under a document carrying another value is
+  no longer silently mis-evaluated. `select_candidate` takes the same
+  `NonZeroUsize`, and `CANDIDATE_CAP` is one: a cap of 0 (no slot ever
+  filled) is unrepresentable rather than documented.
+- **BREAKING — `natural_state` takes a `cutoff: Timestamp`** (total) rather
+  than a `&Conclusion`, and `ChainEnd::Terminal { verdict, at }` is a struct
+  variant carrying a `Verdict`, with a new `ChainEnd::Inconsistent` arm.
+  Internally the slot boundary `T` is now read from the kernel state's own
+  clock anchor rather than tracked in parallel, and a candidate's content is
+  parsed once, shared by the legality probe and the kernel step.
+- **BREAKING — `race_resolution` is `timing`** (`canonical_attestation`,
+  `canonical_timing` — the module resolves timings, not races), and
+  `CanonicalPly` lives in `natural_state`, the only module that builds one.
+- **BREAKING — `implicit::draw_acceptance` is `accepts_standing_offer(params,
+  natural, invoker: Side) -> bool`**: the module detects the acceptance; the
+  `agreement` verdict, like the two other post-chain verdicts, is built in
+  `verdict` — coherent by construction, so the resolution has no fallible
+  step of its own.
+
+### Added
+
+- **`verdict::verdict_at(params, plies, attestations, invoker, cutoff)`** — the
+  invocation primitive (Kernel — Sanki §II.1): the verdict at an instant for a
+  side, with no synthetic event. `expected_verdict` is a thin wrapper that
+  resolves the invoker and cutoff from a Conclusion; `verdict::cutoff_of`
+  exposes that resolution, and reports its reasons in a fixed order (other
+  session, non-player, pending, before t₀) so that the reason reported is the
+  one that holds whatever later happens to the timing.
+- **`verdict::check` → `Check`** (`Conforming(verdict)` / `Wrong { claimed,
+  expected }` / `NoVerdict(reason)`): item-8 conformance that also tells a
+  wrong claim from an unreachable one and says what a conforming Conclusion
+  would carry. `conforms` is `check(...).is_conforming()`.
+- **`Verdict::scores(&SessionParams)` and
+  `SessionParams::outcome_from_scores`** — the seat-axis ⇄ per-player-`result`-tag
+  mapping the wire needs, in one place (a publisher builds the two `result`
+  tags; a reader maps two tags back, refusing a non-player, a doubled player,
+  or a split no verdict of this kernel yields).
+- **`selection::Candidate::is_anterior(boundary)`** — the anterior/informed
+  split, defined once.
+- **`ChainEnd::Inconsistent` / `NoVerdict::Inconsistent`** — a broken internal
+  invariant (a `validate`/`step` divergence) is reported as "no verdict
+  defined", never swallowed into a truncated-chain resignation.
+
+### Removed
+
+- **`race_resolution::canonical_ply`** — dead code from the pre-forgiving
+  model ("the smallest-timed candidate wins the slot"), unused by the crate
+  and contradicting the two-window rule that actually selects.
+
+### Fixed
+
+- Doc citations point to the Canonical Timing NIP, not the non-normative
+  "nostr-integration"; the "self-timed is the default" wording is gone (a
+  conforming founding carries exactly one designation); the self-timed
+  **precondition** — the caller offers only events whose acceptance by a
+  designated timing relay is established — and the event-id uniqueness
+  precondition are stated where the types are.
+- Tests pin what the reviews found unpinned, each checked to fail on the
+  corresponding mutation: the session cap reaching the replay (`K = 1`), the
+  window split at the boundary itself (identical twins timed at `T` select
+  the smallest id), the `draw` flag's part in the candidate identity through
+  the cap, a Ply timed exactly at t₀, abandonment charged from the chain's
+  anchor after a tail premove (not the premove's own timing), a played-Ply
+  timeout outranking the mate it delivers, `select_conclusion` in self-timed
+  mode, the re-premove-back case, a pair straddling the boundary, the
+  `cutoff_of` reason order, `Verdict::new`'s coherence over every
+  status/outcome pair, and `verdict_at` as the invocation primitive. The
+  conformance tests fail — rather than silently pass — when a vendored corpus
+  file is missing.
+
+### Corpus
+
+- **`scenarios.json` v9** (shared with the client): per-Ply `draw` flags, an
+  optional `invoker` + `expectedVerdict { status, result: { first, second } }`
+  per vector — so the post-chain resolution (agreement → abandonment timeout
+  → residual resignation) is a cross-implementation commitment — and an
+  optional `candidateCap` (the session's `K`; the reference document's 8 when
+  absent). Nineteen new vectors (55 in all): the two collapse invariants, the
+  straddling pair, identical twins at the boundary, a Ply at t₀, the session
+  cap, the flag toggle against the cap (under K = 3 and K = 4), acceptance by
+  the offeree and refusal of the offerer, agreement over an expired clock,
+  abandonment against the player on move whoever concludes, residual
+  resignation on and off turn, the last-anchor charge at 600 and 601 s, a
+  played-Ply timeout over a mate, a terminal over a standing offer; two notes
+  reworded (no arbiter).
+
 ## [0.13.0] — 2026-09-04
 
 **The crate is renamed `sashite-sanki-session`** (repository

@@ -23,38 +23,37 @@
 //! detection of its own: per Statuses — Sanki §Verdict resolution, the
 //! post-chain resolution is ordered `agreement` → abandonment `timeout` →
 //! `resignation`, and resignation is simply the fall-through, decisive against
-//! the invoker, whatever the turn. That ordering lives in [`crate::verdict`];
-//! this module only detects the acceptance.
+//! the invoker, whatever the turn. That ordering, and the `agreement` verdict
+//! itself, live in [`crate::verdict`]; this module only detects the acceptance.
 
-use crate::event::Conclusion;
 use crate::natural_state::NaturalState;
 use crate::session::SessionParams;
-use sashite_sanki_engine::domain::outcome::Verdict;
-use sashite_sanki_engine::domain::status::Status;
+use sashite_sanki_engine::domain::side::Side;
 
-/// The `agreement` verdict, if the invocation accepts a standing draw offer.
-///
-/// Returns `Some(agreement)` when the last chain Ply offers a draw and the
-/// Conclusion is signed by its signer's opponent; `None` otherwise (no offer, an
-/// offer extended past by play, an offerer invoking on their own offer, or a
-/// non-player invoker).
+/// Whether the invocation accepts a standing draw offer: the last chain Ply
+/// carries the `draw` flag and `invoker` is its signer's opponent. `false`
+/// otherwise — no offer, an offer extended past by play, or an offerer
+/// invoking on their own offer.
 ///
 /// It reads the chain's tail and nothing else: whether the replay had already
 /// terminated (a mate outranks any standing offer) and whether a clock has run
 /// out are the caller's ordering concern — see [`crate::verdict`].
 #[must_use]
-pub fn draw_acceptance(
+pub fn accepts_standing_offer(
     params: &SessionParams,
     natural: &NaturalState<'_>,
-    conclusion: &Conclusion,
-) -> Option<Verdict> {
-    let invoker = params.side_of(conclusion.signer)?;
-    let last = natural.chain.last()?;
+    invoker: Side,
+) -> bool {
+    let Some(last) = natural.chain.last() else {
+        return false;
+    };
     if !last.ply.draw {
-        return None;
+        return false;
     }
-    let offerer = params.side_of(last.ply.signer)?;
-    (invoker == offerer.flip()).then(|| Verdict::drawn(Status::Agreement))
+    // The chain holds the players' Plies only, so the signer has a side.
+    params
+        .side_of(last.ply.signer)
+        .is_some_and(|offerer| invoker == offerer.flip())
 }
 
 #[cfg(test)]
@@ -66,13 +65,11 @@ mod tests {
         clippy::indexing_slicing
     )]
 
-    use super::draw_acceptance;
-    use crate::event::{Conclusion, EventId, Ply, PublicKey};
-    use crate::natural_state::{ChainEnd, NaturalState};
-    use crate::race_resolution::CanonicalPly;
-    use crate::session::SessionParams;
-    use sashite_sanki_engine::domain::outcome::Verdict;
-    use sashite_sanki_engine::domain::status::{Outcome3, Status};
+    use super::accepts_standing_offer;
+    use crate::event::{EventId, Ply, PublicKey};
+    use crate::natural_state::{CanonicalPly, ChainEnd, NaturalState};
+    use crate::session::{Seats, SessionParams};
+    use sashite_sanki_engine::domain::side::Side;
     use sashite_sanki_engine::domain::time::{Duration, Timestamp};
     use sashite_sanki_engine::domain::time_control::{Period, TimeControl};
     use sashite_sanki_engine::position::Position;
@@ -110,23 +107,20 @@ mod tests {
         SessionParams::new(
             eid(SESSION),
             Some(pk(99)),
-            pk(FIRST),
-            pk(SECOND),
+            Seats::new(pk(FIRST), pk(SECOND)).expect("distinct"),
             TimeControl::new(period, Vec::new()),
             Position::parse("4k^3/8/8/8/8/8/8/4K^3 / W/w").expect("valid FEEN"),
             ts(0),
         )
+        .expect("first to move")
     }
 
-    fn conclusion(signer: u8) -> Conclusion {
-        Conclusion::new(
-            eid(170),
-            pk(signer),
-            eid(SESSION),
-            Status::Agreement,
-            Outcome3::Draw,
-            ts(0),
-        )
+    const fn side(who: u8) -> Side {
+        if who == FIRST {
+            Side::First
+        } else {
+            Side::Second
+        }
     }
 
     #[test]
@@ -142,8 +136,7 @@ mod tests {
             cutoff: ts(1000),
             end: ChainEnd::Ongoing(Box::new(params().initial_state())),
         };
-        let verdict = draw_acceptance(&params(), &natural, &conclusion(SECOND));
-        assert_eq!(verdict, Some(Verdict::drawn(Status::Agreement)));
+        assert!(accepts_standing_offer(&params(), &natural, side(SECOND)));
     }
 
     #[test]
@@ -157,7 +150,7 @@ mod tests {
             cutoff: ts(1000),
             end: ChainEnd::Ongoing(Box::new(params().initial_state())),
         };
-        assert!(draw_acceptance(&params(), &natural, &conclusion(SECOND)).is_none());
+        assert!(!accepts_standing_offer(&params(), &natural, side(SECOND)));
     }
 
     #[test]
@@ -180,7 +173,7 @@ mod tests {
             cutoff: ts(1000),
             end: ChainEnd::Ongoing(Box::new(params().initial_state())),
         };
-        assert!(draw_acceptance(&params(), &natural, &conclusion(FIRST)).is_none());
+        assert!(!accepts_standing_offer(&params(), &natural, side(FIRST)));
     }
 
     #[test]
@@ -196,7 +189,7 @@ mod tests {
             cutoff: ts(1000),
             end: ChainEnd::Ongoing(Box::new(params().initial_state())),
         };
-        assert!(draw_acceptance(&params(), &natural, &conclusion(FIRST)).is_none());
+        assert!(!accepts_standing_offer(&params(), &natural, side(FIRST)));
     }
 
     #[test]
@@ -206,21 +199,7 @@ mod tests {
             cutoff: ts(1000),
             end: ChainEnd::Ongoing(Box::new(params().initial_state())),
         };
-        assert!(draw_acceptance(&params(), &natural, &conclusion(SECOND)).is_none());
-    }
-
-    #[test]
-    fn non_player_invoker_does_not_accept() {
-        let p1 = ply(1, FIRST, 1, true);
-        let natural = NaturalState {
-            chain: vec![CanonicalPly {
-                ply: &p1,
-                at: ts(100),
-            }],
-            cutoff: ts(1000),
-            end: ChainEnd::Ongoing(Box::new(params().initial_state())),
-        };
-        assert!(draw_acceptance(&params(), &natural, &conclusion(77)).is_none());
+        assert!(!accepts_standing_offer(&params(), &natural, side(SECOND)));
     }
 
     // --- Which Ply carries the standing offer, over a REAL replay ----------
@@ -262,12 +241,12 @@ mod tests {
         SessionParams::new(
             eid(SESSION),
             Some(pk(TIMESTAMPER)),
-            pk(FIRST),
-            pk(SECOND),
+            Seats::new(pk(FIRST), pk(SECOND)).expect("distinct"),
             TimeControl::new(period, Vec::new()),
             Position::parse(ROOK_KING).expect("valid FEEN"),
             ts(0),
         )
+        .expect("first to move")
     }
 
     /// `(accepted by first, accepted by second)` for a replayed chain.
@@ -276,13 +255,15 @@ mod tests {
         plies: &[Ply],
         attestations: &[crate::event::Attestation],
     ) -> (bool, bool) {
-        let natural =
-            crate::natural_state::natural_state(params, plies, attestations, &conclusion(FIRST))
-                .expect("attested conclusion");
-        let agreement = Some(Verdict::drawn(Status::Agreement));
+        let cutoff = attestations
+            .iter()
+            .find(|a| a.attests == eid(CONCLUSION))
+            .map(|a| a.created_at)
+            .expect("the fixture attests the conclusion");
+        let natural = crate::natural_state::natural_state(params, plies, attestations, cutoff);
         (
-            draw_acceptance(params, &natural, &conclusion(FIRST)) == agreement,
-            draw_acceptance(params, &natural, &conclusion(SECOND)) == agreement,
+            accepts_standing_offer(params, &natural, side(FIRST)),
+            accepts_standing_offer(params, &natural, side(SECOND)),
         )
     }
 

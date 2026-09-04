@@ -1,5 +1,5 @@
 //! The natural state of events at the cutoff (kind `3425` §Natural state of
-//! events at the cutoff).
+//! events at the cutoff; Kernel — Sanki §II.3–II.5).
 //!
 //! To evaluate a session the kernel replays its play order from its first
 //! half-move, selecting the canonical Ply for each successive slot under the
@@ -11,20 +11,18 @@
 //! For each play-order position (`(signer, step)` under Sanki's strict
 //! alternation), the candidates are the Plies for that slot whose canonical
 //! timing lies in `[t₀, cutoff]` — `t₀` the session start (a Ply timed before
-//! t₀ is invalid, kind `3423` §Time accounting, and never enters a slot —
-//! deciders' confirmation of 2026-07-19), the `cutoff` the Conclusion's own
-//! canonical timing (so a player cannot race a Conclusion by playing after it —
-//! kind `3425` §Implications, *no post-conclusion racing*). Identical-content re-submissions are idempotent
-//! retries, not alternatives: per content, only the **race-canonical
-//! representative** (smallest canonical timing, then smallest event id — kind
-//! `3423` §Race resolution) enters the two-window selection, so duplicates
-//! neither shift the selected timing nor consume cap slots. Legality is probed
-//! **lazily** through [`select_candidate`]'s callback, on the capped windows
-//! only (≤ 2K full-rule probes per slot). Canonical timing is the designated timestamper's
-//! attestation in attested mode, or the event's own relay-enforced `created_at`
-//! when self-timed. The slot's **anchor** is the predecessor half-move's canonical
-//! timing (`t₀` for the first slot), and [`select_candidate`] resolves the
-//! candidates against it (the boundary `T`):
+//! t₀ is invalid, kind `3423` §Time accounting, and never enters a slot), the
+//! `cutoff` the instant the state is evaluated at (a Conclusion's own canonical
+//! timing, so a player cannot race a Conclusion by playing after it — kind
+//! `3425` §Implications, *no post-conclusion racing*). Canonical timing is the
+//! designated timestamper's attestation in attested mode, or the event's own
+//! `created_at` when self-timed — an event whose acceptance by a designated
+//! timing relay is not established is pending and must not be offered to the
+//! replay ([`crate::event`]).
+//!
+//! The slot's **boundary** `T` is the maximum canonical timing among the
+//! preceding half-moves (`t₀` for the first slot) — never rewound by a selected
+//! premove — and [`select_candidate`] resolves the candidates against it:
 //!
 //! - **applied** — the selected Ply is applied to the board: the *latest* legal
 //!   premove (anterior, timed before `T`), else the *earliest* legal live move
@@ -33,25 +31,39 @@
 //! - **unfilled** — no candidate is legal in either window: the chain stops, still
 //!   ongoing.
 //!
-//! Applying a selected Ply through the engine ([`step`]) also surfaces a
-//! rule-system ending (checkmate, …) or a played-Ply timeout, which terminates the
-//! chain. The replay therefore yields either a **terminal verdict** (rule-system
-//! ending / timeout, with the attestation time that caused it) or a still-**ongoing**
-//! end position for the post-chain resolution ([`crate::verdict`]). There is no
-//! `illegalmove` termination — an illegal Ply is skipped, never a loss.
+//! Identical candidates — same content, same `draw` flag — are one candidate
+//! for the cap, represented in each window by the one its scan reaches first
+//! (the latest-timed anterior, the earliest-timed informed): the collapse
+//! never changes which move is selected, it only stops re-signed retries from
+//! consuming cap slots. Identity is the raw `content` string: two encodings
+//! of one move are two candidates, as the specification's "same content"
+//! says. Legality is probed **lazily** through [`select_candidate`]'s
+//! callback, on the capped windows only (≤ 2K full-rule probes per slot, `K`
+//! being the session's `candidate_cap`).
 //!
-//! In attested mode, if the Conclusion is not yet canonically attested the
-//! cutoff is undefined and the natural state cannot be computed
-//! ([`natural_state`] returns `None` — the Conclusion is *pending*, kind `3425`
-//! §Until the Conclusion has canonical timing); self-timed, its own
-//! `created_at` is always a defined cutoff.
+//! Applying a selected Ply through the engine ([`step`]) also surfaces a
+//! rule-system ending (checkmate, …) or a played-Ply timeout, which terminates
+//! the chain. The replay therefore yields a **terminal verdict** (rule-system
+//! ending / timeout, at the canonical timing of the Ply that caused it), a
+//! still-**ongoing** end position for the post-chain resolution
+//! ([`crate::verdict`]), or — on a broken internal invariant, never on a
+//! well-formed position — an **inconsistency**, reported rather than resolved.
+//! There is no `illegalmove` termination — an illegal Ply is skipped, never a
+//! loss.
+//!
+//! The cutoff is an input: [`crate::verdict::cutoff_of`] resolves a
+//! Conclusion's canonical timing (attested mode: its attestation by the
+//! designated timestamper, without which the Conclusion is *pending* — kind
+//! `3425` §Until the Conclusion has canonical timing; self-timed: its own
+//! `created_at`), and a caller probing "the state now" passes the instant
+//! directly. Given a cutoff the replay is total.
 
-use crate::event::{Attestation, Conclusion, EventId, Ply};
-use crate::race_resolution::{canonical_timing, CanonicalPly};
-use crate::selection::{select_candidate, Candidate, Selection, CANDIDATE_CAP};
+use crate::event::{Attestation, EventId, Ply};
+use crate::selection::{select_candidate, Candidate, Selection};
 use crate::session::SessionParams;
+use crate::timing::canonical_timing;
+use crate::verdict::Verdict;
 use sashite_sanki_engine::domain::half_move::Move;
-use sashite_sanki_engine::domain::outcome::Verdict;
 use sashite_sanki_engine::domain::time::Timestamp;
 use sashite_sanki_engine::engine::validate;
 use sashite_sanki_engine::kernel::state::SessionState;
@@ -59,18 +71,47 @@ use sashite_sanki_engine::kernel::step::{step, StepResult};
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
+/// A Ply selected as canonical for its slot, paired with its canonical timing
+/// ([`canonical_timing`]: the attestation's `created_at` in attested mode, or
+/// the Ply's own `created_at` when self-timed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalPly<'a> {
+    /// The canonical Ply.
+    pub ply: &'a Ply,
+    /// The canonical timing of the Ply.
+    pub at: Timestamp,
+}
+
 /// How the replayed chain ends.
 #[derive(Debug, Clone)]
 pub enum ChainEnd {
-    /// The chain reached a terminal verdict during replay — a rule-system ending
-    /// or a played-Ply timeout — at the given attestation time. Post-chain
-    /// resolution does not apply.
-    Terminal(Verdict, Timestamp),
+    /// The chain reached a terminal verdict during replay — a rule-system
+    /// ending or a played-Ply timeout — at the given canonical timing.
+    /// Post-chain resolution does not apply.
+    Terminal {
+        /// The verdict the replay reached.
+        verdict: Verdict,
+        /// The canonical timing of the Ply that reached it (Statuses — Sanki
+        /// §Verdict resolution, step 1). A terminating premove carries an
+        /// anterior timing, so `at` may precede the preceding half-move's; the
+        /// instant the terminal position *existed* is `max(T, at)`, the
+        /// state's clock anchor.
+        at: Timestamp,
+    },
     /// The chain replayed to a still-ongoing position: post-chain resolution
     /// (draw acceptance, abandonment timeout, residual resignation) decides the
     /// verdict on this state. Boxed — a [`SessionState`] dwarfs the terminal
     /// variant, so the box keeps the enum small.
     Ongoing(Box<SessionState>),
+    /// The replay hit a broken internal invariant — a candidate the legality
+    /// probe accepted that the kernel step then rejected, a selected candidate
+    /// missing from its own slot, an engine ending without a terminated
+    /// verdict. Unreachable on a well-formed position (the `validate`/`step`
+    /// agreement is pinned across every variant pairing), and reported rather
+    /// than swallowed: **no verdict is defined** for this state, and a consumer
+    /// must treat the session as unresolved instead of deriving a wrong
+    /// resignation or timeout from a truncated chain.
+    Inconsistent,
 }
 
 /// The natural state: the selected canonical Ply chain, the cutoff it was
@@ -81,7 +122,8 @@ pub struct NaturalState<'a> {
     /// position `i + 1`. A skipped illegal candidate is **not** included (it is not
     /// a played half-move); a terminating *applied* Ply (a mating move, …) **is**.
     pub chain: Vec<CanonicalPly<'a>>,
-    /// The cutoff: the Conclusion's canonical timing.
+    /// The cutoff the state was evaluated at — a Conclusion's canonical timing
+    /// ([`crate::verdict::cutoff_of`]), or any instant a caller probed.
     pub cutoff: Timestamp,
     /// How the chain ended (terminal verdict or ongoing end position).
     pub end: ChainEnd,
@@ -106,61 +148,52 @@ impl NaturalState<'_> {
     }
 }
 
-/// Whether `content` is a legal half-move in `state`'s position, under the full
+/// Whether `mv` is a legal half-move in `state`'s position, under the full
 /// rule system — `engine::validate`, which since engine 0.4 enforces ōgi
 /// uchifuzume exactly as the kernel's `step` path does. The two must agree
 /// **exactly**: [`select_candidate`] only ever returns a candidate this probe
-/// called legal, so a content `validate` accepted and [`step`] then rejected
+/// called legal, so a move `validate` accepted and [`step`] then rejected
 /// would fall into the defensive `StepResult::Illegal` seam below and silently
 /// leave a played game unfinished. The agreement is pinned across all nine
 /// variant pairings, and across the move shapes only some variants have, by the
 /// `is_legal_matches_the_kernel_step_oracle` test below. Legality is a
 /// position question resolved **before** the clock — a legal-but-timed-out move
-/// is still legal here — and probing it clones no state. An unparseable content
-/// is illegal.
-fn is_legal(state: &SessionState, content: &str) -> bool {
-    let Ok(mv) = Move::parse(content) else {
-        return false;
-    };
-    validate(state.position(), &mv).is_ok()
+/// is still legal here — and probing it clones no state.
+fn is_legal(state: &SessionState, mv: &Move) -> bool {
+    validate(state.position(), mv).is_ok()
 }
 
 /// A slot candidate paired with its source Ply (so the selection can be mapped
-/// back to the played event).
+/// back to the played event) and its content parsed once — `None` when the
+/// content is not a well-formed half-move, which makes the candidate illegal
+/// (skipped, never a loss) while still counting against the cap.
 struct SlotCandidate<'a> {
     ply: &'a Ply,
     candidate: Candidate<EventId>,
+    mv: Option<Move>,
 }
 
-/// Computes the natural state of `plies`/`attestations` for the session, cut off
-/// at the canonical timing of `conclusion`.
-///
-/// Returns `None` if `conclusion` has no canonical timing (attested mode: no
-/// attestation from the designated timestamper yet — the cutoff is undefined and
-/// the Conclusion is pending). Self-timed, the cutoff is the Conclusion's own
-/// `created_at`, always defined. The Conclusion's claim is not read here.
+/// Computes the natural state of `plies`/`attestations` for the session at
+/// `cutoff` — a Conclusion's canonical timing ([`crate::verdict::cutoff_of`]),
+/// or any instant a caller wants the state at. Total: every input has a natural
+/// state.
 #[must_use]
 pub fn natural_state<'a>(
     params: &SessionParams,
     plies: &'a [Ply],
     attestations: &'a [Attestation],
-    conclusion: &Conclusion,
-) -> Option<NaturalState<'a>> {
+    cutoff: Timestamp,
+) -> NaturalState<'a> {
     let timestamper = params.timestamper();
     let session = params.session();
-    let start = params.anchor(); // t₀: the lower bound and the first slot's anchor.
+    let start = params.start(); // t₀: the lower bound and the first slot's anchor.
 
-    // The cutoff: the Conclusion's canonical timing. Undefined ⇒ pending.
-    let cutoff = canonical_timing(
-        attestations,
-        conclusion.id,
-        conclusion.created_at,
-        timestamper,
-    )?;
-
+    // The boundary `T` of each slot is the kernel state's own clock anchor —
+    // t₀ at the start, then the maximum canonical timing of the selected
+    // Plies (`SessionState::last_attestation`, which never rewinds): one
+    // value, read by the selection and charged by the clock alike.
     let mut chain: Vec<CanonicalPly<'a>> = Vec::new();
     let mut state = params.initial_state();
-    let mut anchor = start;
     let mut half_move: u32 = 1;
 
     let end = loop {
@@ -174,30 +207,50 @@ pub fn natural_state<'a>(
             .filter(|ply| ply.session == session && ply.signer == signer && ply.step == step_no)
             .filter_map(|ply| {
                 let at = canonical_timing(attestations, ply.id, ply.created_at, timestamper)?;
-                (at >= start && at <= cutoff).then_some(SlotCandidate {
+                (at >= start && at <= cutoff).then(|| SlotCandidate {
                     ply,
                     candidate: Candidate {
                         id: ply.id,
                         created_at: at,
                     },
+                    mv: Move::parse(&ply.content).ok(),
                 })
             })
             .collect();
 
-        // Identical-content re-submissions collapse to their race-canonical
-        // representative — smallest (canonical timing, event id) — before the
-        // two-window rule (Move Encoding — Sanki §Slot candidates and
-        // selection; kind 3423 §Race resolution).
-        let mut representatives: BTreeMap<&str, SlotCandidate<'a>> = BTreeMap::new();
+        // Identical candidates — same content, same `draw` flag — are one
+        // candidate for the cap and are represented, in each window, by the
+        // one the window's scan reaches first: the latest-timed anterior
+        // (largest (timing, id)), the earliest-timed informed (smallest). The
+        // key carries the window — `Candidate::is_anterior`, the split the
+        // selection itself filters on — so a pair straddling the boundary is
+        // two candidates, one per window, whatever order the events arrive
+        // in. Identical candidates have identical legality, so the collapse
+        // never changes which candidate a window's scan reaches first — its
+        // one effect is that re-signed retries cannot push a legal candidate
+        // past the cap (Move Encoding — Sanki §Slot candidates and selection;
+        // Kernel — Sanki §II.3). A re-premove back to an earlier content is a
+        // change of mind and supersedes, exactly as if the twin did not exist.
+        let boundary = state.last_attestation();
+        let mut representatives: BTreeMap<(&str, bool, bool), SlotCandidate<'a>> = BTreeMap::new();
         for entrant in timed {
-            match representatives.entry(entrant.ply.content.as_str()) {
+            let anterior = entrant.candidate.is_anterior(boundary);
+            let key = (entrant.ply.content.as_str(), entrant.ply.draw, anterior);
+            match representatives.entry(key) {
                 Entry::Vacant(vacant) => {
                     vacant.insert(entrant);
                 }
                 Entry::Occupied(mut occupied) => {
                     let held = &occupied.get().candidate;
                     let contender = &entrant.candidate;
-                    if (contender.created_at, contender.id) < (held.created_at, held.id) {
+                    let held_key = (held.created_at, held.id);
+                    let contender_key = (contender.created_at, contender.id);
+                    let replace = if anterior {
+                        contender_key > held_key
+                    } else {
+                        contender_key < held_key
+                    };
+                    if replace {
                         occupied.insert(entrant);
                     }
                 }
@@ -208,14 +261,16 @@ pub fn natural_state<'a>(
         let candidates: Vec<Candidate<EventId>> = slot.iter().map(|sc| sc.candidate).collect();
 
         // The legality probe: consulted lazily by the selection, on the capped
-        // windows only — the ≤ 2K normative bound.
+        // windows only — the ≤ 2K normative bound. An unparseable content is
+        // illegal.
         let probe = |id: &EventId| {
             slot.iter()
                 .find(|sc| sc.ply.id == *id)
-                .is_some_and(|sc| is_legal(&state, &sc.ply.content))
+                .and_then(|sc| sc.mv.as_ref())
+                .is_some_and(|mv| is_legal(&state, mv))
         };
 
-        match select_candidate(anchor, &candidates, CANDIDATE_CAP, probe) {
+        match select_candidate(boundary, &candidates, params.candidate_cap(), probe) {
             // No candidate is legal in either window: the chain stops, still ongoing.
             Selection::Unfilled => break ChainEnd::Ongoing(Box::new(state)),
 
@@ -223,53 +278,49 @@ pub fn natural_state<'a>(
             // rule-system ending / timeout the application surfaces).
             Selection::Applied(chosen) => {
                 let at = chosen.created_at;
-                let Some(ply) = slot
+                // Invariant: the selected candidate is one of this slot's, and the
+                // probe called it legal, so its content parsed. Either failing is
+                // a broken internal invariant — reported, never silently resolved.
+                let Some((ply, mv)) = slot
                     .iter()
                     .find(|sc| sc.ply.id == chosen.id)
-                    .map(|sc| sc.ply)
+                    .and_then(|sc| Some((sc.ply, sc.mv.as_ref()?)))
                 else {
-                    // Unreachable: the selected candidate is one of this slot's
-                    // candidates. Degrade safely to an ongoing chain end.
-                    break ChainEnd::Ongoing(Box::new(state));
-                };
-
-                // Selection guarantees legality, so the content parses; a defensive
-                // failure stops the chain safely (an illegal Ply is never a loss).
-                let Ok(mv) = Move::parse(&ply.content) else {
-                    break ChainEnd::Ongoing(Box::new(state));
+                    break ChainEnd::Inconsistent;
                 };
 
                 // The probe validated the candidate, so a rejection here is a
                 // broken internal invariant — unreachable on a well-formed
-                // position. The rejection hands the state back untouched:
-                // degrade to an ongoing end (an illegal Ply is never a loss).
-                let (outcome, next) = match step(state, &mv, at) {
-                    StepResult::Illegal { state, .. } => break ChainEnd::Ongoing(Box::new(state)),
+                // position (`is_legal_matches_the_kernel_step_oracle`).
+                let (outcome, next) = match step(state, mv, at) {
+                    StepResult::Illegal { .. } => break ChainEnd::Inconsistent,
                     StepResult::Advanced { outcome, next } => (outcome, next),
                 };
                 chain.push(CanonicalPly { ply, at });
                 match next {
                     Some(successor) => {
+                        // The successor's clock anchor is `max(T, at)`: the
+                        // selection boundary NEVER rewinds — an applied premove
+                        // carries an ANTERIOR timing, and anchoring the next slot
+                        // on it would (a) misclassify the next slot's blind
+                        // candidates as informed and (b) bill the next mover for
+                        // time before the position was theirs to answer
+                        // (time-accounting §Elapsed time; pinned by the shared
+                        // conformance vector `scenario.premove-anchor-never-rewinds`).
                         state = successor;
-                        // The selection boundary NEVER rewinds: an applied premove
-                        // carries an ANTERIOR timing, and anchoring the next slot on
-                        // it would (a) misclassify the next slot's blind candidates
-                        // as informed and (b) — through the kernel clock, which holds
-                        // its own monotonic anchor — disagree with the time actually
-                        // chargeable. The anchor is the moment the position became
-                        // answerable: the max of the timings so far (time-accounting
-                        // §Elapsed time; pinned by the shared conformance vector
-                        // `scenario.premove-anchor-never-rewinds`).
-                        anchor = anchor.max(at);
                         half_move = half_move.saturating_add(1);
                     }
-                    None => break ChainEnd::Terminal(outcome.verdict, at),
+                    // The engine ends a session only with a terminated verdict.
+                    None => match Verdict::from_engine(outcome.verdict) {
+                        Some(verdict) => break ChainEnd::Terminal { verdict, at },
+                        None => break ChainEnd::Inconsistent,
+                    },
                 }
             }
         }
     };
 
-    Some(NaturalState { chain, cutoff, end })
+    NaturalState { chain, cutoff, end }
 }
 
 #[cfg(test)]
@@ -282,10 +333,9 @@ mod tests {
     )]
 
     use super::{natural_state, ChainEnd};
-    use crate::event::{Attestation, Conclusion, EventId, Ply, PublicKey};
-    use crate::session::SessionParams;
-    use sashite_sanki_engine::domain::outcome::Verdict;
-    use sashite_sanki_engine::domain::status::{Outcome3, Status};
+    use crate::event::{Attestation, EventId, Ply, PublicKey};
+    use crate::session::{Seats, SessionParams};
+    use sashite_sanki_engine::domain::status::Status;
     use sashite_sanki_engine::domain::time::{Duration, Timestamp};
     use sashite_sanki_engine::domain::time_control::{Period, TimeControl};
     use sashite_sanki_engine::position::Position;
@@ -316,8 +366,9 @@ mod tests {
         ply_at(id, signer, step, content, 0)
     }
 
-    // A ply with an explicit relay-enforced created_at — its canonical timing when
-    // self-timed. In the attested tests below, created_at is ignored, so `ply` seeds 0.
+    // A ply with an explicit created_at — its canonical timing when self-timed
+    // (as accepted by a designated timing relay, the caller's precondition). In
+    // the attested tests below, created_at is ignored, so `ply` seeds 0.
     fn ply_at(id: u8, signer: u8, step: u32, content: &str, created_at: i64) -> Ply {
         Ply::new(
             eid(id),
@@ -339,12 +390,12 @@ mod tests {
         SessionParams::new(
             eid(SESSION),
             Some(pk(TIMESTAMPER)),
-            pk(FIRST),
-            pk(SECOND),
+            Seats::new(pk(FIRST), pk(SECOND)).expect("distinct"),
             TimeControl::new(period, Vec::new()),
             Position::parse(feen).expect("valid FEEN"),
             ts(0),
         )
+        .expect("first to move")
     }
 
     fn params() -> SessionParams {
@@ -356,27 +407,21 @@ mod tests {
         SessionParams::new(
             eid(SESSION),
             None, // self-timed: no timestamper designated
-            pk(FIRST),
-            pk(SECOND),
+            Seats::new(pk(FIRST), pk(SECOND)).expect("distinct"),
             TimeControl::new(period, Vec::new()),
             Position::parse(ROOK_KING).expect("valid FEEN"),
             ts(0),
         )
+        .expect("first to move")
     }
 
-    fn conclusion() -> Conclusion {
-        conclusion_at(0)
-    }
-
-    fn conclusion_at(created_at: i64) -> Conclusion {
-        Conclusion::new(
-            eid(CONCLUSION),
-            pk(FIRST),
-            eid(SESSION),
-            Status::Resignation,
-            Outcome3::SecondWins,
-            ts(created_at),
-        )
+    /// The cutoff the attested fixtures fix: the attestation of the
+    /// (notional) Conclusion `CONCLUSION` among `atts`.
+    fn cutoff(atts: &[Attestation]) -> Timestamp {
+        atts.iter()
+            .find(|a| a.attests == eid(CONCLUSION))
+            .map(|a| a.created_at)
+            .expect("the fixture attests the conclusion")
     }
 
     fn cutoff_att(at: i64) -> Attestation {
@@ -401,8 +446,7 @@ mod tests {
             att(103, 3, 300),
             cutoff_att(1000),
         ];
-        let ns =
-            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
+        let ns = natural_state(&params(), &plies, &atts, cutoff(&atts));
         assert_eq!(ns.chain.len(), 3);
         assert_eq!(ns.next_half_move(), 4);
         assert_eq!(*ns.chain[0].ply.id.as_bytes(), [1; 32]);
@@ -413,15 +457,14 @@ mod tests {
     #[test]
     fn self_timed_chain_uses_event_created_at() {
         // No timestamper and no attestations: the chain is assembled from the plies'
-        // own relay-enforced created_at, and the cutoff from the Conclusion's own.
+        // own created_at, and the cutoff from the Conclusion's own.
         let plies = [
             ply_at(1, FIRST, 1, RA1A4, 100),
             ply_at(2, SECOND, 1, KE8E7, 200),
             ply_at(3, FIRST, 2, RA4A5, 300),
         ];
         let no_atts: Vec<Attestation> = Vec::new();
-        let ns = natural_state(&params_self_timed(), &plies, &no_atts, &conclusion_at(1000))
-            .expect("a self-timed Conclusion has canonical timing");
+        let ns = natural_state(&params_self_timed(), &plies, &no_atts, ts(1000));
         assert_eq!(ns.chain.len(), 3);
         assert_eq!(ns.next_half_move(), 4);
         assert_eq!(*ns.chain[0].ply.id.as_bytes(), [1; 32]);
@@ -437,8 +480,7 @@ mod tests {
             ply_at(2, SECOND, 1, KE8E7, 500),
         ];
         let no_atts: Vec<Attestation> = Vec::new();
-        let ns = natural_state(&params_self_timed(), &plies, &no_atts, &conclusion_at(300))
-            .expect("conclusion");
+        let ns = natural_state(&params_self_timed(), &plies, &no_atts, ts(300));
         assert_eq!(ns.chain.len(), 1); // ply 2 (created_at 500 > cutoff 300) is excluded
     }
 
@@ -447,8 +489,7 @@ mod tests {
         // A Ply attested exactly at the cutoff is included (the `≤` condition).
         let plies = [ply(1, FIRST, 1, RA1A4)];
         let atts = [att(101, 1, 1000), cutoff_att(1000)];
-        let ns =
-            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
+        let ns = natural_state(&params(), &plies, &atts, cutoff(&atts));
         assert_eq!(ns.chain.len(), 1);
     }
 
@@ -466,8 +507,7 @@ mod tests {
             att(103, 3, 2000),
             cutoff_att(1000),
         ];
-        let ns =
-            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
+        let ns = natural_state(&params(), &plies, &atts, cutoff(&atts));
         assert_eq!(ns.chain.len(), 2);
         assert_eq!(ns.next_half_move(), 3);
     }
@@ -479,8 +519,7 @@ mod tests {
         // future-slot Ply and cannot fill it. The chain stops at 1.
         let plies = [ply(1, FIRST, 1, RA1A4), ply(2, FIRST, 2, RA4A5)];
         let atts = [att(101, 1, 100), att(102, 2, 200), cutoff_att(1000)];
-        let ns =
-            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
+        let ns = natural_state(&params(), &plies, &atts, cutoff(&atts));
         assert_eq!(ns.chain.len(), 1);
         assert!(matches!(ns.end, ChainEnd::Ongoing(_)));
     }
@@ -490,8 +529,7 @@ mod tests {
         // (second, step 1) present but not attested: pending, excluded → chain of 1.
         let plies = [ply(1, FIRST, 1, RA1A4), ply(2, SECOND, 1, KE8E7)];
         let atts = [att(101, 1, 100), cutoff_att(1000)];
-        let ns =
-            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
+        let ns = natural_state(&params(), &plies, &atts, cutoff(&atts));
         assert_eq!(ns.chain.len(), 1);
     }
 
@@ -499,8 +537,7 @@ mod tests {
     fn gap_in_play_order_stops_the_chain() {
         let plies = [ply(1, FIRST, 1, RA1A4)];
         let atts = [att(101, 1, 100), cutoff_att(1000)];
-        let ns =
-            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
+        let ns = natural_state(&params(), &plies, &atts, cutoff(&atts));
         assert_eq!(ns.chain.len(), 1);
         assert_eq!(ns.next_half_move(), 2);
         assert!(!ns.is_empty());
@@ -523,8 +560,7 @@ mod tests {
             att(102, 2, 200),
             cutoff_att(1000),
         ];
-        let ns =
-            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
+        let ns = natural_state(&params(), &plies, &atts, cutoff(&atts));
         assert_eq!(ns.chain.len(), 3);
         assert_eq!(*ns.chain[2].ply.id.as_bytes(), [3; 32]);
     }
@@ -547,8 +583,7 @@ mod tests {
             att(103, 3, 60),
             cutoff_att(1000),
         ];
-        let ns =
-            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
+        let ns = natural_state(&params(), &plies, &atts, cutoff(&atts));
         assert_eq!(ns.chain.len(), 2);
         assert_eq!(*ns.chain[1].ply.id.as_bytes(), [3; 32]);
         assert!(matches!(ns.end, ChainEnd::Ongoing(_)));
@@ -564,8 +599,7 @@ mod tests {
             ply(2, SECOND, 1, "[\"e8\",\"e6\",null]"),
         ];
         let atts = [att(101, 1, 100), att(102, 2, 200), cutoff_att(1000)];
-        let ns =
-            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
+        let ns = natural_state(&params(), &plies, &atts, cutoff(&atts));
         assert_eq!(ns.chain.len(), 1); // the illegal live move is skipped, not in the chain
         assert!(matches!(ns.end, ChainEnd::Ongoing(_)));
     }
@@ -577,47 +611,37 @@ mod tests {
         let plies = [ply(1, FIRST, 1, "[\"a1\",\"a8\",null]")];
         let atts = [att(101, 1, 100), cutoff_att(1000)];
         let p = params_feen("7k^/6pp/8/8/8/8/8/R3K^3 / W/w");
-        let ns = natural_state(&p, &plies, &atts, &conclusion()).expect("attested conclusion");
+        let ns = natural_state(&p, &plies, &atts, cutoff(&atts));
         assert_eq!(ns.chain.len(), 1); // the mating move is part of the chain
         match ns.end {
-            ChainEnd::Terminal(verdict, at) => {
-                assert!(matches!(
-                    verdict,
-                    Verdict::Terminated {
-                        status: Status::Checkmate,
-                        ..
-                    }
-                ));
+            ChainEnd::Terminal { verdict, at } => {
+                assert_eq!(verdict.status(), Status::Checkmate);
                 assert_eq!(at, ts(100));
             }
-            ChainEnd::Ongoing(_) => panic!("expected a checkmate termination"),
+            ChainEnd::Ongoing(_) | ChainEnd::Inconsistent => {
+                panic!("expected a checkmate termination")
+            }
         }
-    }
-
-    #[test]
-    fn unattested_conclusion_yields_none() {
-        let plies = [ply(1, FIRST, 1, RA1A4)];
-        let atts = [att(101, 1, 100)];
-        assert!(natural_state(&params(), &plies, &atts, &conclusion()).is_none());
     }
 
     #[test]
     fn empty_chain_if_no_first_ply() {
         let plies: [Ply; 0] = [];
         let atts = [cutoff_att(1000)];
-        let ns =
-            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
+        let ns = natural_state(&params(), &plies, &atts, cutoff(&atts));
         assert!(ns.is_empty());
         assert_eq!(ns.next_half_move(), 1);
         assert!(matches!(ns.end, ChainEnd::Ongoing(_)));
     }
 
     #[test]
-    fn identical_content_duplicates_collapse_to_the_race_canonical() {
-        // Two identical-content premoves for (second, step 1) — @50 id 2 and a
-        // retry @60 id 3: idempotent retries, not alternatives. The
-        // representative is the race-canonical (smallest timing, then id), so
-        // the selected ply is id 2 @50 — its timing then anchors the next slot.
+    fn identical_candidates_collapse_to_the_one_the_window_reaches_first() {
+        // Two identical premoves for (second, step 1) — @50 id 2 and a re-sign
+        // @60 id 3: one candidate for the cap, represented by the one the
+        // anterior scan (newest-first) reaches first, id 3 @60 — exactly what
+        // the selection would pick with no collapse at all. The collapse
+        // never changes the selected move, and a premove's timing charges no
+        // clock and moves no anchor.
         let plies = [
             ply(1, FIRST, 1, RA1A4),
             ply(2, SECOND, 1, KE8E7),
@@ -629,11 +653,101 @@ mod tests {
             att(103, 3, 60),
             cutoff_att(1000),
         ];
-        let ns =
-            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
+        let ns = natural_state(&params(), &plies, &atts, cutoff(&atts));
         assert_eq!(ns.chain.len(), 2);
+        assert_eq!(*ns.chain[1].ply.id.as_bytes(), [3; 32]);
+        assert_eq!(ns.chain[1].at, ts(60));
+
+        // In the informed window the earliest wins, with or without the
+        // collapse: the same pair timed after the boundary selects id 2.
+        let atts = [
+            att(101, 1, 20),
+            att(102, 2, 50),
+            att(103, 3, 60),
+            cutoff_att(1000),
+        ];
+        let ns = natural_state(&params(), &plies, &atts, cutoff(&atts));
         assert_eq!(*ns.chain[1].ply.id.as_bytes(), [2; 32]);
-        assert_eq!(ns.chain[1].at, ts(50));
+    }
+
+    #[test]
+    fn a_re_premove_back_to_an_earlier_content_supersedes() {
+        // second premoves Ke8-e7 @50, changes their mind to Ke8-d8 @60, and
+        // changes it back to Ke8-e7 @70 — all anterior to first's move @200.
+        // The most recent intent is Ke8-e7. A collapse keyed on content that
+        // kept the EARLIEST duplicate (@50) would hand the slot to Ke8-d8 @60:
+        // the collapse must never change the selection.
+        let plies = [
+            ply(1, FIRST, 1, RA1A4),
+            ply(2, SECOND, 1, KE8E7),
+            ply(3, SECOND, 1, "[\"e8\",\"d8\",null]"),
+            ply(4, SECOND, 1, KE8E7),
+        ];
+        let atts = [
+            att(101, 1, 200),
+            att(102, 2, 50),
+            att(103, 3, 60),
+            att(104, 4, 70),
+            cutoff_att(1000),
+        ];
+        let ns = natural_state(&params(), &plies, &atts, cutoff(&atts));
+        assert_eq!(ns.chain.len(), 2);
+        assert_eq!(*ns.chain[1].ply.id.as_bytes(), [4; 32]);
+        assert_eq!(ns.chain[1].ply.content, KE8E7);
+    }
+
+    #[test]
+    fn a_pair_straddling_the_boundary_is_two_candidates() {
+        // The same content published once anterior (@50) and once informed
+        // (@250, after first's move @200): two candidates, one per window,
+        // whatever order the events arrive in. The anterior one wins (premoves
+        // are scanned first); were it buried past the cap by newer premoves,
+        // the informed twin would still be there to take the slot.
+        let plies = [
+            ply(1, FIRST, 1, RA1A4),
+            ply(2, SECOND, 1, KE8E7),
+            ply(3, SECOND, 1, KE8E7),
+        ];
+        let atts = [
+            att(101, 1, 200),
+            att(102, 2, 50),
+            att(103, 3, 250),
+            cutoff_att(1000),
+        ];
+        for order in [[0_usize, 1, 2], [0, 2, 1], [2, 1, 0]] {
+            let permuted: Vec<Ply> = order.iter().map(|&i| plies[i].clone()).collect();
+            let ns = natural_state(&params(), &permuted, &atts, cutoff(&atts));
+            assert_eq!(*ns.chain[1].ply.id.as_bytes(), [2; 32], "order {order:?}");
+            assert_eq!(ns.chain[1].at, ts(50));
+        }
+        // Buried: eight newer premoves of eight DISTINCT illegal contents
+        // (identical ones would collapse) fill the anterior cap ahead of the
+        // @50 twin; the anterior window yields nothing within its cap, and
+        // the informed twin — a separate candidate — takes the slot.
+        let illegal = [
+            "[\"e8\",\"e6\",null]",
+            "[\"e8\",\"e5\",null]",
+            "[\"e8\",\"e4\",null]",
+            "[\"e8\",\"e3\",null]",
+            "[\"e8\",\"a8\",null]",
+            "[\"e8\",\"h8\",null]",
+            "[\"e8\",\"b5\",null]",
+            "[\"e8\",\"c6\",null]",
+        ];
+        let mut flood: Vec<Ply> = plies.to_vec();
+        let mut flood_atts = atts.to_vec();
+        for (i, content) in illegal.iter().enumerate() {
+            let id = 10_u8.saturating_add(u8::try_from(i).expect("small"));
+            flood.push(ply(id, SECOND, 1, content));
+            flood_atts.push(att(
+                100_u8.saturating_add(id),
+                id,
+                60 + i64::try_from(i).expect("small"),
+            ));
+        }
+        let ns = natural_state(&params(), &flood, &flood_atts, cutoff(&flood_atts));
+        assert_eq!(*ns.chain[1].ply.id.as_bytes(), [3; 32], "the informed twin");
+        assert_eq!(ns.chain[1].at, ts(250));
     }
 
     #[test]
@@ -642,8 +756,7 @@ mod tests {
         // never enters its slot — deciders' confirmation of 2026-07-19.
         let plies = [ply(1, FIRST, 1, RA1A4)];
         let atts = [att(101, 1, -5), cutoff_att(1000)];
-        let ns =
-            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
+        let ns = natural_state(&params(), &plies, &atts, cutoff(&atts));
         assert!(ns.is_empty());
         assert!(matches!(ns.end, ChainEnd::Ongoing(_)));
     }
@@ -657,65 +770,57 @@ mod tests {
 
         let plies = [ply(1, FIRST, 1, RA1A4)];
         let atts = [att(101, 1, 700), cutoff_att(1000)];
-        let ns =
-            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
+        let ns = natural_state(&params(), &plies, &atts, cutoff(&atts));
         assert_eq!(ns.chain.len(), 1);
         match ns.end {
-            ChainEnd::Terminal(verdict, at) => {
-                assert!(matches!(
-                    verdict,
-                    Verdict::Terminated {
-                        status: Status::Timeout,
-                        ..
-                    }
-                ));
+            ChainEnd::Terminal { verdict, at } => {
+                assert_eq!(verdict.status(), Status::Timeout);
                 assert_eq!(at, ts(700));
             }
-            ChainEnd::Ongoing(_) => panic!("expected a played-ply timeout"),
+            ChainEnd::Ongoing(_) | ChainEnd::Inconsistent => {
+                panic!("expected a played-ply timeout")
+            }
         }
     }
 
     #[test]
-    fn the_play_order_model_presumes_a_first_to_move_founding_position() {
-        // A PRECONDITION, pinned rather than enforced. The replay maps
-        // play-order position 1 to `(first, step 1)` under Sanki's strict
-        // alternation (kind `3423` §Step semantics and play order), so the
-        // founding position of kind `3422` must have `first` on move — as the
-        // standard starting positions of all three variants do. `SessionParams`
-        // is documented as assembled *after* cross-event validation, and this
-        // module does not re-derive the turn from the position.
-        //
-        // The case matters more for a session founded mid-game (an adjourned
-        // cross-variant position, say) than for one founded from a start. The
-        // position below is a real one — the chess/ōgi standard start after
-        // 1.g2-g4 — and it has `second` on move. `second`'s genuine, legal,
-        // canonically attested step-1 Ply is then never reachable: slot 1 wants
-        // `first`, no candidate fills it, and the chain stops empty. Nothing
-        // panics and nothing is sanctioned; the invocation simply falls through
-        // to the post-chain resolution as if no move had been played.
-        let p =
-            params_feen("-rnbik^bn-r/+f+f+f+f+f+f+f+f/8/8/6P1/8/+P+P+P+P+P+P1+P/-RNBQK^BN-R / j/W");
-        let plies = [ply(1, SECOND, 1, "[\"e7\",\"e5\",null]")];
-        let atts = [att(101, 1, 100), cutoff_att(1000)];
-        let ns = natural_state(&p, &plies, &atts, &conclusion()).expect("attested conclusion");
-        assert!(ns.is_empty());
-        assert_eq!(ns.next_half_move(), 1);
-        match ns.end {
-            ChainEnd::Ongoing(state) => {
-                assert_eq!(
-                    state.position().active_side(),
-                    sashite_sanki_engine::domain::side::Side::Second
-                );
-            }
-            ChainEnd::Terminal(verdict, _) => {
-                panic!("expected an ongoing chain, got {verdict:?}")
-            }
-        }
+    fn a_founding_position_with_second_to_move_is_refused_at_construction() {
+        // The replay maps play-order position 1 to `(first, step 1)` under
+        // Sanki's strict alternation (kind `3423` §Step semantics and play
+        // order), so the founding position of kind `3422` must have `first` on
+        // move — as the position the rule-system document prescribes does.
+        // A position with `second` on move — a real one, the chess/ōgi start
+        // after 1.g2-g4 — would make slot 1 unfillable for good and charge
+        // `second`'s abandonment from t₀ while their genuine Ply waits for a
+        // slot that never comes. `SessionParams::new` refuses it, so no such
+        // session is ever evaluated.
+        let period = Period::new(Duration::from_secs(600), None, None).expect("valid period");
+        let refused = SessionParams::new(
+            eid(SESSION),
+            Some(pk(TIMESTAMPER)),
+            Seats::new(pk(FIRST), pk(SECOND)).expect("distinct"),
+            TimeControl::new(period, Vec::new()),
+            Position::parse(
+                "-rnbik^bn-r/+f+f+f+f+f+f+f+f/8/8/6P1/8/+P+P+P+P+P+P1+P/-RNBQK^BN-R / j/W",
+            )
+            .expect("valid FEEN"),
+            ts(0),
+        );
+        assert!(refused.is_none());
+    }
+
+    /// The probe as the replay applies it to a raw content: parsed once, an
+    /// unparseable content being illegal.
+    fn is_legal_content(
+        state: &sashite_sanki_engine::kernel::state::SessionState,
+        content: &str,
+    ) -> bool {
+        sashite_sanki_engine::domain::half_move::Move::parse(content)
+            .is_ok_and(|mv| super::is_legal(state, &mv))
     }
 
     #[test]
     fn is_legal_matches_the_kernel_step_oracle() {
-        use super::is_legal;
         use sashite_sanki_engine::domain::half_move::Move;
         use sashite_sanki_engine::domain::time_control::{Period, TimeControl};
         use sashite_sanki_engine::kernel::state::SessionState;
@@ -1258,12 +1363,12 @@ mod tests {
                 "{label}: the fixture FEEN is not canonical"
             );
             assert_eq!(
-                is_legal(&s, content),
+                is_legal_content(&s, content),
                 oracle(&s, content),
                 "probe/oracle divergence on {label}: {content} in {feen} ({secs} s bank)"
             );
             assert_eq!(
-                is_legal(&s, content),
+                is_legal_content(&s, content),
                 *expected,
                 "legality class drifted on {label}: {content} in {feen}"
             );
@@ -1290,7 +1395,6 @@ mod tests {
     #[test]
     #[ignore = "exhaustive: 486_852 probe pairs over 20 positions, ~2.6 s in a debug build — seven times the rest of the suite. Run with `cargo test -- --ignored`."]
     fn is_legal_matches_the_kernel_step_oracle_exhaustively() {
-        use super::is_legal;
         use sashite_sanki_engine::domain::half_move::Move;
         use sashite_sanki_engine::domain::square::Square;
         use sashite_sanki_engine::domain::time_control::{Period, TimeControl};
@@ -1359,7 +1463,7 @@ mod tests {
                     Err(_) => false,
                 };
                 assert_eq!(
-                    is_legal(&state, content),
+                    is_legal_content(&state, content),
                     oracle,
                     "probe/oracle divergence on {content} in {feen}"
                 );
@@ -1395,29 +1499,20 @@ mod tests {
         );
     }
 
-    /// The identical-content dedup key ignores the `draw` flag — a deliberate
-    /// reading of "identical-content re-submissions are idempotent retries",
-    /// pinned here because it is **observable** and asymmetric across the two
-    /// windows, and because the shared corpus makes it a cross-implementation
-    /// commitment rather than a local choice.
-    ///
-    /// In the **informed** window the key is immaterial: the earliest legal
-    /// candidate wins whatever the content, so a later re-publication never
-    /// takes the slot — with a differing content it loses just the same. In the
-    /// **anterior** window the latest legal premove wins, so the key decides:
-    /// two premoves differing only in the `draw` flag collapse to the earlier
-    /// (flagless) one and the offer is destroyed, where the same pair with
-    /// differing contents keeps both, lets the later offer take the slot, and
-    /// the acceptance rules `agreement`.
-    ///
-    /// Whether an offer attached to a re-submitted move ought to survive is a
-    /// normative question about kind 3423 §Race resolution, not something to
-    /// settle by changing the key here: `natural_state` is one of two
-    /// implementations gated by the same corpus.
+    /// The collapse of identical candidates is keyed on the content AND the
+    /// `draw` flag: an offer is part of what a Ply says, so a flagged twin
+    /// and a flagless one are two candidates (Move Encoding — Sanki §Slot
+    /// candidates and selection). Since each window keeps the candidate its
+    /// scan reaches first, the flag's part in the identity can never change
+    /// *which* candidate is selected — that twin would represent the pair
+    /// either way. Its one observable effect is on the **cap**: a pair that
+    /// differs only by the flag consumes two of the `K` window slots. That is
+    /// the case pinned below, discriminatingly; the two leading cases are the
+    /// selection-level ones the shared corpus carries.
     #[test]
-    fn the_draw_flag_is_outside_the_identical_content_dedup_key() {
-        // Boundary T for second's slot is first's timing (500), so both of
-        // second's candidates (100, 200) are ANTERIOR premoves.
+    fn the_draw_flag_is_part_of_the_identity_of_a_candidate() {
+        // Boundary T for second's slot is first's timing (500), so all of
+        // second's candidates below are ANTERIOR premoves.
         let offer = |id: u8, content: &str| {
             Ply::new(
                 eid(id),
@@ -1437,36 +1532,180 @@ mod tests {
         ];
         let p = params();
 
-        // Same content: the pair collapses to the earlier, flagless ply.
-        let collapsed = [
+        // Same content, the later one carrying an offer: the latest legal
+        // premove — the offer — takes the slot (as it would with no flag in
+        // the key: the collapse keeps the scan's first).
+        let with_offer = [
             ply(1, FIRST, 1, RA1A4),
             ply(3, SECOND, 1, KE8E7),
             offer(4, KE8E7),
         ];
-        let natural = natural_state(&p, &collapsed, &atts, &conclusion()).expect("a natural state");
+        let natural = natural_state(&p, &with_offer, &atts, cutoff(&atts));
         assert_eq!(natural.chain.len(), 2);
         let tail = natural.chain.last().expect("a tail");
-        assert_eq!(
-            tail.ply.id,
-            eid(3),
-            "the earlier representative took the slot"
-        );
-        assert!(!tail.ply.draw, "and the offer went with the ply it lost to");
+        assert_eq!(tail.ply.id, eid(4));
+        assert!(tail.ply.draw, "the offer stands");
 
-        // Differing content: both survive, and the later premove — the one
-        // carrying the offer — wins the anterior window.
-        let kept = [
+        // Same content, both flagless: one candidate, represented by the
+        // latest (the scan's first) — the selection is unchanged either way.
+        let twins = [
             ply(1, FIRST, 1, RA1A4),
             ply(3, SECOND, 1, KE8E7),
-            offer(4, "[\"e8\",\"d7\",null]"),
+            ply(4, SECOND, 1, KE8E7),
         ];
-        let natural = natural_state(&p, &kept, &atts, &conclusion()).expect("a natural state");
+        let natural = natural_state(&p, &twins, &atts, cutoff(&atts));
         let tail = natural.chain.last().expect("a tail");
-        assert_eq!(
-            tail.ply.id,
-            eid(4),
-            "the latest legal premove takes the slot"
+        assert_eq!(tail.ply.id, eid(4));
+        assert!(!tail.ply.draw);
+
+        // THE DISCRIMINATING CASE — the cap. K = 3; four anterior premoves,
+        // newest first: Y @130 (illegal), X+draw @120 (illegal), X @110
+        // (illegal), Z @100 (legal). With the flag in the key, X and X+draw
+        // are two candidates and the window is {Y, X+draw, X} — three illegal
+        // moves, the slot unfilled, Z never probed. Were the flag ignored, X
+        // and X+draw would collapse to one candidate (X+draw, the scan's
+        // first) and the window {Y, X+draw, Z} would reach Z.
+        const X: &str = "[\"e8\",\"e6\",null]"; // illegal: the king moves two
+        const Y: &str = "[\"e8\",\"e5\",null]"; // illegal
+        let capped = [
+            ply(1, FIRST, 1, RA1A4),
+            ply(2, SECOND, 1, KE8E7), // Z, legal
+            ply(3, SECOND, 1, X),
+            offer(4, X),
+            ply(5, SECOND, 1, Y),
+        ];
+        let capped_atts = [
+            att(101, 1, 500),
+            att(102, 2, 100),
+            att(103, 3, 110),
+            att(104, 4, 120),
+            att(105, 5, 130),
+            att(171, CONCLUSION, 1000),
+        ];
+        let three = core::num::NonZeroUsize::new(3).expect("non-zero");
+        let natural = natural_state(
+            &p.clone().with_candidate_cap(three),
+            &capped,
+            &capped_atts,
+            cutoff(&capped_atts),
         );
-        assert!(tail.ply.draw, "so its offer stands");
+        assert_eq!(
+            natural.chain.len(),
+            1,
+            "the flagged and flagless X are two candidates, and fill the cap"
+        );
+        // One more slot of cap and Z is reached: the cap, not legality, is
+        // what excluded it.
+        let four = core::num::NonZeroUsize::new(4).expect("non-zero");
+        let natural = natural_state(
+            &p.clone().with_candidate_cap(four),
+            &capped,
+            &capped_atts,
+            cutoff(&capped_atts),
+        );
+        assert_eq!(natural.chain.len(), 2);
+        assert_eq!(natural.chain[1].ply.id, eid(2));
+    }
+
+    #[test]
+    fn the_cap_the_session_carries_bounds_the_windows() {
+        // first plays @100; second premoved Ke8-e7 @50 (legal) and then
+        // Ke8-e5 @60 (illegal) — both anterior. Under the reference cap the
+        // anterior scan skips the illegal newer premove and reaches the legal
+        // older one: chain of 2. Under a session whose document carries K = 1
+        // the newest premove alone fills the window, and the slot stays
+        // unfilled: chain of 1. The cap in force is the session's, not the
+        // constant's (kind `3422` `rules`; Move Encoding — Sanki §Bounding a
+        // slot's candidates).
+        let plies = [
+            ply(1, FIRST, 1, RA1A4),
+            ply(2, SECOND, 1, KE8E7),
+            ply(3, SECOND, 1, "[\"e8\",\"e5\",null]"),
+        ];
+        let atts = [
+            att(101, 1, 100),
+            att(102, 2, 50),
+            att(103, 3, 60),
+            cutoff_att(1000),
+        ];
+        let reference = natural_state(&params(), &plies, &atts, cutoff(&atts));
+        assert_eq!(reference.chain.len(), 2);
+        assert_eq!(reference.chain[1].ply.id, eid(2));
+
+        let one = core::num::NonZeroUsize::new(1).expect("non-zero");
+        let tight = params().with_candidate_cap(one);
+        let natural = natural_state(&tight, &plies, &atts, cutoff(&atts));
+        assert_eq!(
+            natural.chain.len(),
+            1,
+            "K = 1 admits the newest premove only"
+        );
+        assert!(matches!(natural.end, ChainEnd::Ongoing(_)));
+    }
+
+    #[test]
+    fn identical_twins_timed_at_the_boundary_are_informed() {
+        // first plays @100, which is the boundary T of second's slot. second's
+        // two identical replies are both timed exactly AT 100: informed (at
+        // or after T), so the earliest wins and the tie falls to the smaller
+        // id, 2 — the informed scan's first, which is the twin the collapse
+        // must keep. A collapse that classified `<= T` as anterior would keep
+        // the larger id, 3, and diverge from the selection (and from the
+        // client) on which event is canonical.
+        let plies = [
+            ply(1, FIRST, 1, RA1A4),
+            ply(2, SECOND, 1, KE8E7),
+            ply(3, SECOND, 1, KE8E7),
+        ];
+        let atts = [
+            att(101, 1, 100),
+            att(102, 2, 100),
+            att(103, 3, 100),
+            cutoff_att(1000),
+        ];
+        for order in [[0_usize, 1, 2], [0, 2, 1], [2, 1, 0], [1, 2, 0]] {
+            let permuted: Vec<Ply> = order.iter().map(|&i| plies[i].clone()).collect();
+            let ns = natural_state(&params(), &permuted, &atts, cutoff(&atts));
+            assert_eq!(ns.chain.len(), 2, "order {order:?}");
+            assert_eq!(ns.chain[1].ply.id, eid(2), "order {order:?}");
+        }
+        // One second earlier the pair is anterior, and the LATEST — the larger
+        // id at equal timing — represents it instead.
+        let anterior = [
+            att(101, 1, 100),
+            att(102, 2, 99),
+            att(103, 3, 99),
+            cutoff_att(1000),
+        ];
+        let ns = natural_state(&params(), &plies, &anterior, cutoff(&anterior));
+        assert_eq!(ns.chain[1].ply.id, eid(3));
+    }
+
+    #[test]
+    fn a_ply_timed_exactly_at_t0_is_a_candidate() {
+        // The candidate window is `[t₀, cutoff]`, closed at both ends: a Ply
+        // canonically timed AT t₀ is valid (kind `3423` §Time accounting rules
+        // out timings *before* t₀) and, the first slot's boundary being t₀,
+        // informed. One second earlier it never enters the slot.
+        let period = Period::new(Duration::from_secs(600), None, None).expect("valid period");
+        let scheduled = SessionParams::new(
+            eid(SESSION),
+            Some(pk(TIMESTAMPER)),
+            Seats::new(pk(FIRST), pk(SECOND)).expect("distinct"),
+            TimeControl::new(period, Vec::new()),
+            Position::parse(ROOK_KING).expect("valid FEEN"),
+            ts(1000),
+        )
+        .expect("first to move");
+        let plies = [ply(1, FIRST, 1, RA1A4)];
+
+        let at_start = [att(101, 1, 1000), cutoff_att(2000)];
+        let ns = natural_state(&scheduled, &plies, &at_start, cutoff(&at_start));
+        assert_eq!(ns.chain.len(), 1);
+        assert_eq!(ns.chain[0].at, ts(1000));
+
+        let too_early = [att(101, 1, 999), cutoff_att(2000)];
+        let ns = natural_state(&scheduled, &plies, &too_early, cutoff(&too_early));
+        assert!(ns.is_empty());
     }
 }

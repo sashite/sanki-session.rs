@@ -2,13 +2,13 @@
 //! canonical Ply (Move Encoding — Sanki §Slot candidates and selection).
 //!
 //! A `(session, signer, step)` slot may hold several candidate Plies. Each is
-//! classified against the slot's **boundary** — the predecessor half-move's
-//! canonical attestation, or t₀ for the first slot — by its own canonical
-//! attestation `created_at`:
+//! classified against the slot's **boundary** — the maximum canonical timing
+//! among the preceding half-moves, or t₀ for the first slot — by its own
+//! canonical timing:
 //!
-//! - a candidate attested **strictly before** the boundary is **anterior** (a
+//! - a candidate timed **strictly before** the boundary is **anterior** (a
 //!   premove, committed before the position it faces existed);
-//! - one attested **at or after** the boundary is **informed** (a live move,
+//! - one timed **at or after** the boundary is **informed** (a live move,
 //!   played in knowledge of the position).
 //!
 //! The canonical Ply is chosen by trying the two windows in order, anterior first:
@@ -37,18 +37,29 @@
 //! `selection.json` conformance vectors, so this kernel and the TypeScript client
 //! agree bit-for-bit on which Ply is canonical.
 //!
-//! Identical-content re-submissions are **deduplicated upstream** (they are
-//! idempotent retries, not alternatives — [`crate::natural_state`] keeps the
-//! race-canonical representative per content before calling this rule).
+//! Identical candidates are **collapsed upstream** for the cap's sake
+//! ([`crate::natural_state`] keeps, per window, the one this rule would reach
+//! first), so the collapse never changes what this rule selects. The window a
+//! candidate belongs to is decided in one place — [`Candidate::is_anterior`] —
+//! read by the collapse and by [`select_candidate`] alike.
 
+use core::num::NonZeroUsize;
 use sashite_sanki_engine::domain::time::Timestamp;
 
-/// The per-window candidate cap `K`: at most the `K` most-recent anterior
-/// candidates, or the `K` earliest informed ones, are considered (≤ `2K` legality
-/// tests per slot). `K > 1` leaves room for an honest re-premove or retry; a player
-/// flooding their own window past `K` only self-harms. A compile-time constant
-/// of this crate (a deployment tunes it by recompiling).
-pub const CANDIDATE_CAP: usize = 8;
+/// The reference rule-system document's per-window candidate cap `K`
+/// (`session.candidate_cap` of the `sanki` manifest): at most the `K`
+/// most-recent anterior candidates, or the `K` earliest informed ones, are
+/// considered (≤ `2K` legality tests per slot). `K > 1` leaves room for an
+/// honest re-premove or retry; a player flooding their own window past `K` only
+/// self-harms. A session carries its own document's value
+/// ([`crate::session::SessionParams::candidate_cap`]); this constant is the
+/// default for the reference document. A cap is at least `1` by type — a cap
+/// of `0` would fill no slot ever.
+pub const CANDIDATE_CAP: NonZeroUsize = match NonZeroUsize::new(8) {
+    Some(cap) => cap,
+    // `8 != 0`; the arm is never taken, and the type admits no other value.
+    None => NonZeroUsize::MIN,
+};
 
 /// A slot candidate reduced to what selection needs: its identity (the race
 /// tiebreak) and its canonical timing. Legality is NOT carried — it is probed
@@ -57,8 +68,21 @@ pub const CANDIDATE_CAP: usize = 8;
 pub struct Candidate<Id> {
     /// The candidate's identity — the event-id race tiebreak.
     pub id: Id,
-    /// The candidate's canonical attestation `created_at`.
+    /// The candidate's canonical timing.
     pub created_at: Timestamp,
+}
+
+impl<Id> Candidate<Id> {
+    /// Whether the candidate is **anterior** to `boundary` — timed strictly
+    /// before it, a premove committed before the position it faces existed.
+    /// Otherwise it is **informed** — timed at or after the boundary, a live
+    /// move played in knowledge of the position. The one place the split is
+    /// decided (Move Encoding — Sanki §Slot candidates and selection).
+    #[inline]
+    #[must_use]
+    pub fn is_anterior(&self, boundary: Timestamp) -> bool {
+        self.created_at < boundary
+    }
 }
 
 /// The outcome of selecting among a slot's candidates.
@@ -84,8 +108,8 @@ impl<Id> Selection<'_, Id> {
 
 /// Selects the canonical candidate for a slot with the given `boundary`.
 ///
-/// `candidates` is the slot's unordered candidate set. A candidate is *anterior*
-/// iff `created_at < boundary`, else *informed*. Implements the two-window rule
+/// `candidates` is the slot's unordered candidate set, each anterior or
+/// informed per [`Candidate::is_anterior`]. Implements the two-window rule
 /// above, with the per-window cap `cap` (`K`); `is_legal` is the caller's
 /// legality probe, consulted **only** for candidates inside a capped window —
 /// at most `2 × cap` probes per call, however many candidates are flooded.
@@ -93,15 +117,15 @@ impl<Id> Selection<'_, Id> {
 pub fn select_candidate<'a, Id: Ord>(
     boundary: Timestamp,
     candidates: &'a [Candidate<Id>],
-    cap: usize,
+    cap: NonZeroUsize,
     mut is_legal: impl FnMut(&Id) -> bool,
 ) -> Selection<'a, Id> {
-    // Anterior window (premoves, created_at < boundary): the K most recent by
-    // (created_at, id), newest first — the first legal is the LATEST legal premove
-    // (a re-premove supersedes an older one).
+    // Anterior window (premoves): the K most recent by (created_at, id), newest
+    // first — the first legal is the LATEST legal premove (a re-premove
+    // supersedes an older one).
     let mut anterior: Vec<&'a Candidate<Id>> = candidates
         .iter()
-        .filter(|candidate| candidate.created_at < boundary)
+        .filter(|candidate| candidate.is_anterior(boundary))
         .collect();
     anterior.sort_by(|a, b| {
         b.created_at
@@ -110,18 +134,18 @@ pub fn select_candidate<'a, Id: Ord>(
     });
     if let Some(chosen) = anterior
         .into_iter()
-        .take(cap)
+        .take(cap.get())
         .find(|candidate| is_legal(&candidate.id))
     {
         return Selection::Applied(chosen);
     }
 
-    // Informed window (live moves, created_at >= boundary): the K earliest by
-    // (created_at, id), oldest first — the first legal is the EARLIEST legal live
-    // move (committed on its first legal instance, not overwritten by a later one).
+    // Informed window (live moves): the K earliest by (created_at, id), oldest
+    // first — the first legal is the EARLIEST legal live move (committed on its
+    // first legal instance, not overwritten by a later one).
     let mut informed: Vec<&'a Candidate<Id>> = candidates
         .iter()
-        .filter(|candidate| candidate.created_at >= boundary)
+        .filter(|candidate| !candidate.is_anterior(boundary))
         .collect();
     informed.sort_by(|a, b| {
         a.created_at
@@ -130,7 +154,7 @@ pub fn select_candidate<'a, Id: Ord>(
     });
     if let Some(chosen) = informed
         .into_iter()
-        .take(cap)
+        .take(cap.get())
         .find(|candidate| is_legal(&candidate.id))
     {
         return Selection::Applied(chosen);
@@ -149,10 +173,16 @@ mod tests {
     )]
 
     use super::{select_candidate, Candidate, Selection, CANDIDATE_CAP};
+    use core::num::NonZeroUsize;
     use sashite_sanki_engine::domain::time::Timestamp;
 
     fn ts(secs: i64) -> Timestamp {
         Timestamp::from_unix(secs)
+    }
+
+    /// A per-window cap `K`.
+    fn cap(k: usize) -> NonZeroUsize {
+        NonZeroUsize::new(k).expect("a cap is at least 1")
     }
 
     /// `(id, created_at)` → a candidate with a `&str` id.
@@ -315,12 +345,12 @@ mod tests {
         // self-harm).
         let cs = [cand("a1", 10), cand("a2", 800), cand("a3", 900)];
         assert_eq!(
-            select_candidate(ts(1000), &cs, 2, probe(&["a1"])),
+            select_candidate(ts(1000), &cs, cap(2), probe(&["a1"])),
             Selection::Unfilled
         );
         // With K=3 the older legal premove is reached.
         assert_eq!(
-            select_candidate(ts(1000), &cs, 3, probe(&["a1"])),
+            select_candidate(ts(1000), &cs, cap(3), probe(&["a1"])),
             Selection::Applied(&cs[0])
         );
     }
@@ -331,11 +361,11 @@ mod tests {
         // live move is beyond the cap → unfilled.
         let cs = [cand("a1", 10), cand("a2", 20), cand("a3", 30)];
         assert_eq!(
-            select_candidate(ts(0), &cs, 2, probe(&["a3"])),
+            select_candidate(ts(0), &cs, cap(2), probe(&["a3"])),
             Selection::Unfilled
         );
         assert_eq!(
-            select_candidate(ts(0), &cs, 3, probe(&["a3"])),
+            select_candidate(ts(0), &cs, cap(3), probe(&["a3"])),
             Selection::Applied(&cs[2])
         );
     }
@@ -361,7 +391,7 @@ mod tests {
             }); // informed
         }
         let mut probed: Vec<usize> = Vec::new();
-        let selection = select_candidate(ts(100), &cs, 2, |id| {
+        let selection = select_candidate(ts(100), &cs, cap(2), |id| {
             probed.push(*id);
             false // everything illegal: both windows scanned to their cap
         });
@@ -371,7 +401,7 @@ mod tests {
         // Short-circuiting: the first legal candidate stops the scan, so the same
         // flood costs a single probe when the newest premove is legal.
         let mut probed: Vec<usize> = Vec::new();
-        let selection = select_candidate(ts(100), &cs, 2, |id| {
+        let selection = select_candidate(ts(100), &cs, cap(2), |id| {
             probed.push(*id);
             *id == 19
         });
@@ -466,9 +496,14 @@ mod tests {
         ];
         let mut probed = Vec::new();
         assert_eq!(
-            select_candidate(ts(100), &four, 4, recording_probe(&["a1"], &mut probed))
-                .selected()
-                .map(|chosen| chosen.id),
+            select_candidate(
+                ts(100),
+                &four,
+                cap(4),
+                recording_probe(&["a1"], &mut probed)
+            )
+            .selected()
+            .map(|chosen| chosen.id),
             Some("a1")
         );
         assert_eq!(probed, ["a4", "a3", "a2", "a1"]);
@@ -486,7 +521,12 @@ mod tests {
         ];
         let mut probed = Vec::new();
         assert_eq!(
-            select_candidate(ts(100), &five, 4, recording_probe(&["a1"], &mut probed)),
+            select_candidate(
+                ts(100),
+                &five,
+                cap(4),
+                recording_probe(&["a1"], &mut probed)
+            ),
             Selection::Unfilled
         );
         assert_eq!(probed, ["a5", "a4", "a3", "a2"]);
@@ -504,7 +544,7 @@ mod tests {
         ];
         let mut probed = Vec::new();
         assert_eq!(
-            select_candidate(ts(0), &four, 4, recording_probe(&["a4"], &mut probed))
+            select_candidate(ts(0), &four, cap(4), recording_probe(&["a4"], &mut probed))
                 .selected()
                 .map(|chosen| chosen.id),
             Some("a4")
@@ -521,14 +561,14 @@ mod tests {
         ];
         let mut probed = Vec::new();
         assert_eq!(
-            select_candidate(ts(0), &five, 4, recording_probe(&["a5"], &mut probed)),
+            select_candidate(ts(0), &five, cap(4), recording_probe(&["a5"], &mut probed)),
             Selection::Unfilled
         );
         assert_eq!(probed, ["a1", "a2", "a3", "a4"]);
     }
 
     #[test]
-    fn empty_and_zero_cap_inputs_are_unfilled_without_probing() {
+    fn empty_input_and_the_smallest_cap_are_handled_without_waste() {
         // No candidate at all: unfilled, and legality is never consulted.
         let none: [Candidate<&'static str>; 0] = [];
         let mut probed = Vec::new();
@@ -543,22 +583,57 @@ mod tests {
         );
         assert!(probed.is_empty());
 
-        // A degenerate K = 0 admits nothing into either window — the ≤ 2K bound
-        // holds at its lower extreme too, in both windows.
-        let anterior = [cand("p1", 50)];
+        // K = 1, the smallest cap the type admits (a cap of 0 would fill no
+        // slot ever, and is unrepresentable): each window admits exactly its
+        // first candidate — the newest premove, the oldest live move — so the
+        // ≤ 2K bound holds at its lower extreme, and a legal candidate behind
+        // the first one is never reached.
+        let cs = [
+            cand("p1", 40),
+            cand("p2", 50),
+            cand("L1", 150),
+            cand("L2", 160),
+        ];
         let mut probed = Vec::new();
         assert_eq!(
-            select_candidate(ts(100), &anterior, 0, recording_probe(&["p1"], &mut probed)),
+            select_candidate(
+                ts(100),
+                &cs,
+                cap(1),
+                recording_probe(&["p1", "L2"], &mut probed)
+            ),
             Selection::Unfilled
         );
-        assert!(probed.is_empty());
-        let informed = [cand("L1", 150)];
+        assert_eq!(probed, ["p2", "L1"]);
         let mut probed = Vec::new();
         assert_eq!(
-            select_candidate(ts(100), &informed, 0, recording_probe(&["L1"], &mut probed)),
-            Selection::Unfilled
+            select_candidate(ts(100), &cs, cap(1), recording_probe(&["L1"], &mut probed))
+                .selected()
+                .map(|chosen| chosen.id),
+            Some("L1")
         );
-        assert!(probed.is_empty());
+        assert_eq!(probed, ["p2", "L1"]);
+    }
+
+    #[test]
+    fn the_window_split_has_one_definition() {
+        // `Candidate::is_anterior` is the split `select_candidate` filters on
+        // and the split the upstream collapse keys on: strictly before the
+        // boundary is anterior, at or after it is informed. Pinned at the
+        // boundary itself, where the two would diverge if either read `<=`.
+        let boundary = ts(100);
+        assert!(cand("before", 99).is_anterior(boundary));
+        assert!(!cand("at", 100).is_anterior(boundary));
+        assert!(!cand("after", 101).is_anterior(boundary));
+        // …and the selection agrees with it: the candidate at the boundary is
+        // in the informed window, scanned oldest-first behind nothing.
+        let cs = [cand("at", 100), cand("after", 101)];
+        assert_eq!(
+            select_candidate(boundary, &cs, CANDIDATE_CAP, probe(&["at", "after"]))
+                .selected()
+                .map(|chosen| chosen.id),
+            Some("at")
+        );
     }
 
     #[test]
@@ -615,7 +690,7 @@ mod tests {
             let chosen = select_candidate(
                 ts(100),
                 &order,
-                2,
+                cap(2),
                 recording_probe(&["p1", "L1"], &mut probed),
             )
             .selected()

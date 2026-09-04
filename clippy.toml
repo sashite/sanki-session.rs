@@ -1,1 +1,5 @@
-# Project lint thresholds (placeholder).
+# Clippy configuration. The crate's lint policy lives in Cargo.toml
+# (`[lints.clippy]`: unwrap/expect/panic/indexing/arithmetic denied outside
+# tests); the MSRV clippy reasons against is Cargo.toml's `rust-version`.
+# Nothing here overrides either — the file exists so that a future threshold
+# (e.g. `too-many-arguments-threshold`) has a home and is not set ad hoc.

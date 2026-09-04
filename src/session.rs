@@ -4,113 +4,79 @@
 //! the application assembles them, after cross-event validation, into one
 //! aggregate:
 //!
-//! - from the **Game Session** (kind `3422`): the two players and their seats,
-//!   the per-player variants (carried by the initial position's styles), the
-//!   initial position, and the session's event id;
+//! - from the **Game Session** (kind `3422`): the two players and their seats
+//!   ([`Seats`]), the per-player variants (carried by the initial position's
+//!   styles), the initial position, and the session's event id;
 //! - from the **founding** (kind `3420`, or `3418`/`3419`): the time control
-//!   and the OPTIONAL designated timestamper (absent → the session is
-//!   self-timed, its canonical timing being the events' own relay-enforced
-//!   `created_at`; attestation is a dormant capability). The `rules` term the
-//!   founding carries is not held here: this crate *is* the reference
-//!   implementation of the `sashite.sanki.kernel/1` rule system, and checking
-//!   that a session's manifest is one it implements is the caller's concern
-//!   (`sashite_sanki_engine::rules`);
+//!   and the OPTIONAL designated timestamper (a timestamper puts the session in
+//!   attested mode; `None` means self-timed — the founding designated timing
+//!   relays instead, and each event's own `created_at`, once accepted by one of
+//!   them, is its canonical timing. Exactly one of the two designations is
+//!   present on a conforming founding; a self-timed session's events reach this
+//!   crate only once their acceptance is established — see
+//!   [`crate::timing`]);
+//! - from the **rule-system document** the founding names (its `rules` term):
+//!   the slot selection cap `K` (`session.candidate_cap`), the one parameter of
+//!   the session kernel the document carries. The position-kernel parameters
+//!   (the thresholds, the tables) live in `sashite-sanki-engine`, which
+//!   implements the reference document's values; checking that a session's
+//!   manifest is one this pair of crates implements is the caller's concern
+//!   (`sashite_sanki_engine::rules::verify`);
 //! - from t₀, the canonical session start — the Session Start Attestation (kind
 //!   `3410`) in attested mode, or the Game Session's own `created_at` when
-//!   self-timed.
+//!   self-timed (or its `start_at`, when later — kind `3422` §Canonical session
+//!   start).
 //!
 //! This module is a pure aggregate plus the lookups the kernel layers need:
 //! mapping a signer to its side, naming the player on a side, recognizing the
-//! timestamper, and mapping a **play-order position** (1-based half-move index)
-//! to its slot — the side on move and that side's `step` (the signer's own move
-//! ordinal, kind `3423` §Step semantics and play order) — under Sanki's strict
-//! alternation. The per-player variants are not duplicated here — they are read
-//! from the [`Position`] (its style field), via [`SessionParams::initial_state`]
-//! and the kernel.
+//! timestamper, mapping per-player scores to a seat-axis outcome, and mapping a
+//! **play-order position** (1-based half-move index) to its slot — the side on
+//! move and that side's `step` (the signer's own move ordinal, kind `3423` §Step
+//! semantics and play order) — under Sanki's strict alternation. The per-player
+//! variants are not duplicated here — they are read from the [`Position`] (its
+//! style field), via [`SessionParams::initial_state`] and the kernel.
 
 use crate::event::{EventId, PublicKey};
+use crate::selection::CANDIDATE_CAP;
+use core::num::NonZeroUsize;
 use sashite_sanki_engine::domain::side::Side;
+use sashite_sanki_engine::domain::status::Outcome3;
 use sashite_sanki_engine::domain::time::Timestamp;
 use sashite_sanki_engine::domain::time_control::TimeControl;
 use sashite_sanki_engine::kernel::state::SessionState;
 use sashite_sanki_engine::position::Position;
 
-/// The invariant parameters of a session.
-#[derive(Debug, Clone)]
-pub struct SessionParams {
-    session: EventId,
-    /// The designated timestamper (attested mode), or `None` when self-timed.
-    timestamper: Option<PublicKey>,
+/// The two players by seat: who moves `first`, who moves `second` (the Game
+/// Session's `seat` tags). The two keys are distinct by construction — a
+/// session cannot be played against oneself, and a swap flips every decisive
+/// verdict, which is why the constructor names them rather than taking two
+/// positional pubkeys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Seats {
     first: PublicKey,
     second: PublicKey,
-    time_control: TimeControl,
-    initial_position: Position,
-    anchor: Timestamp,
 }
 
-impl SessionParams {
-    /// Assembles the session parameters. `first` and `second` are the players
-    /// assigned to the corresponding seats by the Game Session; `anchor` is t₀,
-    /// the canonical session start (kind `3422` §Canonical session start).
-    // A faithful constructor for a 7-field aggregate; grouping the fields would
-    // only obscure them.
-    #[allow(clippy::too_many_arguments)]
+impl Seats {
+    /// The seats, or `None` when the two keys are equal.
     #[inline]
     #[must_use]
-    pub const fn new(
-        session: EventId,
-        timestamper: Option<PublicKey>,
-        first: PublicKey,
-        second: PublicKey,
-        time_control: TimeControl,
-        initial_position: Position,
-        anchor: Timestamp,
-    ) -> Self {
-        Self {
-            session,
-            timestamper,
-            first,
-            second,
-            time_control,
-            initial_position,
-            anchor,
-        }
+    pub fn new(first: PublicKey, second: PublicKey) -> Option<Self> {
+        (first != second).then_some(Self { first, second })
     }
 
-    /// The Game Session event id this session is scoped to.
+    /// The player who moves first.
     #[inline]
     #[must_use]
-    pub const fn session(&self) -> EventId {
-        self.session
+    pub const fn first(&self) -> PublicKey {
+        self.first
     }
 
-    /// The designated timestamper (whose attestations are authoritative), or
-    /// `None` when the session is self-timed (no timestamper was designated).
+    /// The player who moves second.
     #[inline]
     #[must_use]
-    pub const fn timestamper(&self) -> Option<PublicKey> {
-        self.timestamper
-    }
-
-    /// The session's time control.
-    #[inline]
-    #[must_use]
-    pub const fn time_control(&self) -> &TimeControl {
-        &self.time_control
-    }
-
-    /// The initial position.
-    #[inline]
-    #[must_use]
-    pub const fn initial_position(&self) -> &Position {
-        &self.initial_position
-    }
-
-    /// t₀, the canonical session start.
-    #[inline]
-    #[must_use]
-    pub const fn anchor(&self) -> Timestamp {
-        self.anchor
+    pub const fn second(&self) -> PublicKey {
+        self.second
     }
 
     /// The player assigned to `side`.
@@ -135,12 +101,139 @@ impl SessionParams {
             None
         }
     }
+}
+
+/// The invariant parameters of a session.
+#[derive(Debug, Clone)]
+pub struct SessionParams {
+    session: EventId,
+    /// The designated timestamper (attested mode), or `None` when self-timed.
+    timestamper: Option<PublicKey>,
+    seats: Seats,
+    time_control: TimeControl,
+    initial_position: Position,
+    start: Timestamp,
+    candidate_cap: NonZeroUsize,
+}
+
+impl SessionParams {
+    /// Assembles the session parameters: the Game Session's id, the optional
+    /// timestamper, the seats, the time control, the initial position and
+    /// `start` — t₀, the canonical session start (kind `3422` §Canonical
+    /// session start). The slot selection cap defaults to the reference
+    /// document's `candidate_cap` ([`CANDIDATE_CAP`]); a session founded under
+    /// a document carrying another value sets it with
+    /// [`SessionParams::with_candidate_cap`].
+    ///
+    /// `None` iff the initial position does not have `first` to move. The
+    /// position a Game Session carries is the one the rule-system document
+    /// prescribes (kind `3422` §Content), and every Sanki initial position has
+    /// `first` to move; the play-order model ([`SessionParams::side_at`])
+    /// rests on it, so a position that breaks it is refused here rather than
+    /// evaluated into a chain no Ply can ever fill.
+    #[inline]
+    #[must_use]
+    pub fn new(
+        session: EventId,
+        timestamper: Option<PublicKey>,
+        seats: Seats,
+        time_control: TimeControl,
+        initial_position: Position,
+        start: Timestamp,
+    ) -> Option<Self> {
+        (initial_position.active_side() == Side::First).then_some(Self {
+            session,
+            timestamper,
+            seats,
+            time_control,
+            initial_position,
+            start,
+            candidate_cap: CANDIDATE_CAP,
+        })
+    }
+
+    /// The same parameters under the slot selection cap `K` the session's
+    /// rule-system document carries (`session.candidate_cap`, *Move Encoding —
+    /// Sanki* §Bounding a slot's candidates). At least `1` by type: a cap of
+    /// `0` would fill no slot ever — a session no Ply could advance, refused
+    /// at construction like a position without `first` to move rather than
+    /// evaluated into abandonment verdicts.
+    #[inline]
+    #[must_use]
+    pub const fn with_candidate_cap(mut self, candidate_cap: NonZeroUsize) -> Self {
+        self.candidate_cap = candidate_cap;
+        self
+    }
+
+    /// The Game Session event id this session is scoped to.
+    #[inline]
+    #[must_use]
+    pub const fn session(&self) -> EventId {
+        self.session
+    }
+
+    /// The designated timestamper (whose attestations are authoritative), or
+    /// `None` when the session is self-timed (no timestamper was designated).
+    #[inline]
+    #[must_use]
+    pub const fn timestamper(&self) -> Option<PublicKey> {
+        self.timestamper
+    }
+
+    /// The two players by seat.
+    #[inline]
+    #[must_use]
+    pub const fn seats(&self) -> &Seats {
+        &self.seats
+    }
+
+    /// The session's time control.
+    #[inline]
+    #[must_use]
+    pub const fn time_control(&self) -> &TimeControl {
+        &self.time_control
+    }
+
+    /// The initial position.
+    #[inline]
+    #[must_use]
+    pub const fn initial_position(&self) -> &Position {
+        &self.initial_position
+    }
+
+    /// t₀, the canonical session start.
+    #[inline]
+    #[must_use]
+    pub const fn start(&self) -> Timestamp {
+        self.start
+    }
+
+    /// The slot selection cap `K` (at least `1`).
+    #[inline]
+    #[must_use]
+    pub const fn candidate_cap(&self) -> NonZeroUsize {
+        self.candidate_cap
+    }
+
+    /// The player assigned to `side`.
+    #[inline]
+    #[must_use]
+    pub const fn player(&self, side: Side) -> PublicKey {
+        self.seats.player(side)
+    }
+
+    /// The side a pubkey plays, or `None` if it is not one of the two players.
+    #[inline]
+    #[must_use]
+    pub fn side_of(&self, pubkey: PublicKey) -> Option<Side> {
+        self.seats.side_of(pubkey)
+    }
 
     /// Whether `pubkey` is one of the two players.
     #[inline]
     #[must_use]
     pub fn is_player(&self, pubkey: PublicKey) -> bool {
-        pubkey == self.first || pubkey == self.second
+        self.seats.side_of(pubkey).is_some()
     }
 
     /// Whether `pubkey` is the designated timestamper. Always `false` for a
@@ -150,6 +243,34 @@ impl SessionParams {
     #[must_use]
     pub fn is_timestamper(&self, pubkey: PublicKey) -> bool {
         self.timestamper == Some(pubkey)
+    }
+
+    /// The seat-axis outcome of a Conclusion's two `result` tags — one
+    /// `(player, score)` per player, the scores summing to `100` — or `None`
+    /// when the tags do not describe an outcome of the `sanki` rule system: a
+    /// pubkey that is not a player, both tags naming the same player, or a split
+    /// other than `100/0`, `50/50`, `0/100` (kind `3425` admits other integer
+    /// splits on the wire; no verdict of this kernel ever yields one, so a
+    /// Conclusion carrying one cannot be conforming and needs no replay to be
+    /// refused).
+    #[must_use]
+    pub fn outcome_from_scores(&self, scores: [(PublicKey, u8); 2]) -> Option<Outcome3> {
+        let [(a, score_a), (b, score_b)] = scores;
+        let side_a = self.side_of(a)?;
+        let side_b = self.side_of(b)?;
+        if side_a == side_b {
+            return None;
+        }
+        let (first, second) = match side_a {
+            Side::First => (score_a, score_b),
+            Side::Second => (score_b, score_a),
+        };
+        match (first, second) {
+            (100, 0) => Some(Outcome3::FirstWins),
+            (50, 50) => Some(Outcome3::Draw),
+            (0, 100) => Some(Outcome3::SecondWins),
+            _ => None,
+        }
     }
 
     /// The side on move at the 1-based position `half_move` of the play order,
@@ -201,7 +322,7 @@ impl SessionParams {
         SessionState::start(
             self.initial_position.clone(),
             self.time_control.clone(),
-            self.anchor,
+            self.start,
         )
     }
 }
@@ -215,9 +336,10 @@ mod tests {
         clippy::indexing_slicing
     )]
 
-    use super::SessionParams;
+    use super::{Seats, SessionParams};
     use crate::event::{EventId, PublicKey};
     use sashite_sanki_engine::domain::side::Side;
+    use sashite_sanki_engine::domain::status::Outcome3;
     use sashite_sanki_engine::domain::time::{Duration, Timestamp};
     use sashite_sanki_engine::domain::time_control::{Period, TimeControl};
     use sashite_sanki_engine::position::Position;
@@ -241,12 +363,12 @@ mod tests {
         SessionParams::new(
             id(1),
             Some(pk(3)),
-            pk(10),
-            pk(20),
+            Seats::new(pk(10), pk(20)).expect("distinct players"),
             time_control(),
             Position::parse(START_FEEN).expect("valid Sanki FEEN"),
             Timestamp::from_unix(1000),
         )
+        .expect("first to move")
     }
 
     #[test]
@@ -281,12 +403,12 @@ mod tests {
         let p = SessionParams::new(
             id(1),
             None,
-            pk(10),
-            pk(20),
+            Seats::new(pk(10), pk(20)).expect("distinct players"),
             time_control(),
             Position::parse(START_FEEN).expect("valid Sanki FEEN"),
             Timestamp::from_unix(1000),
-        );
+        )
+        .expect("first to move");
         assert_eq!(p.timestamper(), None);
         assert!(!p.is_timestamper(pk(3)));
         assert!(!p.is_timestamper(pk(10)));
@@ -395,12 +517,12 @@ mod tests {
         let p = SessionParams::new(
             id(1),
             Some(pk(3)),
-            pk(10),
-            pk(20),
+            Seats::new(pk(10), pk(20)).expect("distinct players"),
             TimeControl::new(main, vec![overtime]),
             Position::parse(START_FEEN).expect("valid Sanki FEEN"),
             Timestamp::from_unix(1000),
-        );
+        )
+        .expect("first to move");
         assert_eq!(p.time_control().period_count(), 2);
         let state = p.initial_state();
         for side in [Side::First, Side::Second] {
@@ -412,6 +534,45 @@ mod tests {
         assert_eq!(state.last_attestation(), Timestamp::from_unix(1000));
         // The founding position is `first` to move — the premise `side_at` rests on.
         assert_eq!(state.position().active_side(), p.side_at(state.half_move()));
+    }
+
+    #[test]
+    fn seats_reject_a_player_against_themselves() {
+        assert!(Seats::new(pk(10), pk(10)).is_none());
+        let seats = Seats::new(pk(10), pk(20)).expect("distinct");
+        assert_eq!(seats.first(), pk(10));
+        assert_eq!(seats.second(), pk(20));
+        assert_eq!(seats.player(Side::Second), pk(20));
+        assert_eq!(seats.side_of(pk(20)), Some(Side::Second));
+        assert_eq!(seats.side_of(pk(30)), None);
+    }
+
+    #[test]
+    fn scores_map_to_the_seat_axis_outcome_whatever_the_tag_order() {
+        let p = params();
+        // first = pk(10), second = pk(20).
+        assert_eq!(
+            p.outcome_from_scores([(pk(10), 100), (pk(20), 0)]),
+            Some(Outcome3::FirstWins)
+        );
+        assert_eq!(
+            p.outcome_from_scores([(pk(20), 0), (pk(10), 100)]),
+            Some(Outcome3::FirstWins)
+        );
+        assert_eq!(
+            p.outcome_from_scores([(pk(20), 100), (pk(10), 0)]),
+            Some(Outcome3::SecondWins)
+        );
+        assert_eq!(
+            p.outcome_from_scores([(pk(10), 50), (pk(20), 50)]),
+            Some(Outcome3::Draw)
+        );
+        // Not an outcome of this kernel: a stranger, a doubled player, an
+        // uncommon split, a split not summing to 100.
+        assert_eq!(p.outcome_from_scores([(pk(99), 100), (pk(20), 0)]), None);
+        assert_eq!(p.outcome_from_scores([(pk(10), 100), (pk(10), 0)]), None);
+        assert_eq!(p.outcome_from_scores([(pk(10), 70), (pk(20), 30)]), None);
+        assert_eq!(p.outcome_from_scores([(pk(10), 100), (pk(20), 100)]), None);
     }
 
     #[test]
@@ -429,7 +590,10 @@ mod tests {
         let p = params();
         assert_eq!(p.session(), id(1));
         assert_eq!(p.timestamper(), Some(pk(3)));
-        assert_eq!(p.anchor(), Timestamp::from_unix(1000));
+        assert_eq!(p.start(), Timestamp::from_unix(1000));
+        assert_eq!(p.candidate_cap().get(), 8);
+        let three = core::num::NonZeroUsize::new(3).expect("non-zero");
+        assert_eq!(p.clone().with_candidate_cap(three).candidate_cap(), three);
         assert_eq!(p.initial_position().to_feen(), START_FEEN);
     }
 }

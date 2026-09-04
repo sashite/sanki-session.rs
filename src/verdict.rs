@@ -1,15 +1,19 @@
-//! The kernel result and the top-level [`kernel_result`] orchestration; the
-//! conformance of a Conclusion ([`conforms`]) and which Conclusion rules
+//! The verdict — what the rule system yields at a cutoff, and what a Conclusion
+//! claims — and the three questions consumers ask of it: what a Conclusion
+//! *should* claim ([`expected_verdict`]), whether a Conclusion conforms
+//! ([`check`], [`conforms`]), and which Conclusion rules the session
 //! ([`select_conclusion`]).
 //!
-//! [`kernel_result`] turns a session's public events into the verdict the rule
-//! system yields at a Conclusion's cutoff (kind `3425` §Natural state of events
-//! at the cutoff; Statuses — Sanki §Verdict resolution): a termination
-//! [`Status`] (the event's `content`) and a result distribution ([`Outcome3`],
-//! the `result` tags). It composes every layer below it. A Conclusion is
-//! **binding by correctness** (kind `3425` §Semantic constraints, item 8): it
-//! terminates the session iff the verdict it claims *is* this result —
-//! [`conforms`] is that check.
+//! The primitive is [`verdict_at`]: given the session, its public events, an
+//! **invoker** (the side ending the session) and a **cutoff** (the instant the
+//! natural state is evaluated at), it yields the verdict — Kernel — Sanki
+//! §II.1's invocation. A Conclusion (kind `3425`) is one invocation with a
+//! claim attached: its signer is the invoker, its canonical timing the cutoff
+//! ([`cutoff_of`]), and it is **binding by correctness** (kind `3425` §Semantic
+//! constraints, item 8): it terminates the session iff the verdict it claims
+//! *is* the verdict the rule system yields there. A client about to conclude,
+//! or a bot deciding whether to claim a win on time, calls [`verdict_at`] with
+//! its own side and the present instant and publishes exactly that.
 //!
 //! # Verdict resolution
 //!
@@ -23,19 +27,18 @@
 //! - a still-**ongoing** end position, on which the invocation is resolved at the
 //!   cutoff, in order: draw acceptance (`agreement`, [`crate::implicit`]);
 //!   abandonment timeout (`timeout`: the on-move player's clock, ticked from the
-//!   chain's last attestation — or t₀ for an empty chain — to the cutoff, has
-//!   expired); otherwise **residual resignation** (`resignation`, decisive
-//!   against the concluding player, whatever the turn).
+//!   chain's anchor — t₀ for an empty chain — to the cutoff, has expired);
+//!   otherwise **residual resignation** (`resignation`, decisive against the
+//!   invoker, whatever the turn).
 //!
 //! An illegal candidate — premove or live — is never a cause: it is skipped during
 //! selection (never a loss), so there is no `illegalmove` termination. Because
-//! resignation is the residual interpretation, a canonically timed Conclusion
-//! from a session player **always has a kernel result** — concluding is at the
-//! signer's risk (kind `3425` §Implications). [`kernel_result`] returns `None`
-//! only when the Conclusion is structurally out of reach — it does not
-//! reference this session, or its signer is not a session player (kind `3425`
-//! §Semantic constraints, items 2–3) — or when it has no canonical timing yet
-//! (the cutoff is undefined: the Conclusion is *pending*).
+//! resignation is the residual interpretation, every invocation has a verdict:
+//! concluding is at the signer's risk (kind `3425` §Implications). The only
+//! way [`verdict_at`] answers no verdict, from t₀ on, is a replay that hit a
+//! broken internal invariant ([`crate::natural_state::ChainEnd::Inconsistent`])
+//! — reported as [`NoVerdict::Inconsistent`], never resolved into a wrong
+//! resignation.
 //!
 //! Several Conclusions may coexist, and their cutoffs differ, hence possibly
 //! their verdicts. [`select_conclusion`] pins the deterministic policy of kind
@@ -43,26 +46,91 @@
 //! canonical timing, smallest event id as tiebreaker; a non-conforming one
 //! never occupies the slot, whatever its timing.
 
-use crate::event::{Attestation, Conclusion, Ply};
-use crate::implicit::draw_acceptance;
+use crate::event::{Attestation, Conclusion, Ply, PublicKey};
+use crate::implicit::accepts_standing_offer;
 use crate::natural_state::{natural_state, ChainEnd, NaturalState};
-use crate::race_resolution::canonical_timing;
 use crate::session::SessionParams;
+use crate::timing::canonical_timing;
 use sashite_sanki_engine::clock::tick;
-use sashite_sanki_engine::domain::outcome::Verdict;
+use sashite_sanki_engine::domain::outcome::Verdict as EngineVerdict;
 use sashite_sanki_engine::domain::side::Side;
-use sashite_sanki_engine::domain::status::{Outcome3, Status};
-use sashite_sanki_engine::domain::time::Duration;
+use sashite_sanki_engine::domain::status::{Outcome3, ResultKind, Status};
+use sashite_sanki_engine::domain::time::{Duration, Timestamp};
 
-/// The verdict the rule system yields at a cutoff: a termination status and a
-/// result distribution. A conforming Conclusion carries exactly this.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KernelResult {
+/// A verdict: a termination status and a result distribution — what the rule
+/// system yields at a cutoff ([`verdict_at`]), and what a Conclusion claims
+/// ([`Conclusion::claim`]). The two are compared as values: a conforming
+/// Conclusion carries exactly the verdict the rule system yields at its cutoff.
+///
+/// The pair is **coherent by construction**: a decisive status (`checkmate`,
+/// `timeout`, `resignation`) carries a decisive outcome, a draw status a draw —
+/// the `Status`/result-kind mapping of Statuses — Sanki. The wire admits more
+/// (kind `3425` constrains its `content` and its `result` tags separately); a
+/// pair no verdict of this kernel can yield is refused by [`Verdict::new`], so a
+/// Conclusion carrying one cannot be built and needs no replay to be refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Verdict {
     status: Status,
-    result: Outcome3,
+    outcome: Outcome3,
 }
 
-impl KernelResult {
+impl Verdict {
+    /// A verdict from a status and an outcome — a Conclusion's `content` and
+    /// the outcome its `result` tags map to
+    /// ([`SessionParams::outcome_from_scores`]). `None` when the outcome's
+    /// kind is not the status's: a draw status with a decisive outcome, or a
+    /// decisive status with a draw.
+    #[inline]
+    #[must_use]
+    pub const fn new(status: Status, outcome: Outcome3) -> Option<Self> {
+        let coherent = match (status.result_kind(), outcome) {
+            (ResultKind::Draw, Outcome3::Draw) => true,
+            (ResultKind::Decisive, Outcome3::FirstWins | Outcome3::SecondWins) => true,
+            (ResultKind::Draw, Outcome3::FirstWins | Outcome3::SecondWins)
+            | (ResultKind::Decisive, Outcome3::Draw) => false,
+        };
+        if coherent {
+            Some(Self { status, outcome })
+        } else {
+            None
+        }
+    }
+
+    /// The `agreement` draw — the acceptance of a standing offer.
+    const AGREEMENT: Self = Self {
+        status: Status::Agreement,
+        outcome: Outcome3::Draw,
+    };
+
+    /// The abandonment `timeout`, decisive against the player whose clock ran out.
+    #[inline]
+    const fn timeout_against(loser: Side) -> Self {
+        Self {
+            status: Status::Timeout,
+            outcome: Outcome3::loss_for(loser),
+        }
+    }
+
+    /// The residual `resignation`, decisive against the invoker.
+    #[inline]
+    const fn resignation_by(invoker: Side) -> Self {
+        Self {
+            status: Status::Resignation,
+            outcome: Outcome3::loss_for(invoker),
+        }
+    }
+
+    /// The verdict the engine reached, or `None` if its verdict is `Ongoing`
+    /// (or, defensively, an incoherent pair the engine never produces).
+    #[inline]
+    #[must_use]
+    pub(crate) const fn from_engine(verdict: EngineVerdict) -> Option<Self> {
+        match verdict {
+            EngineVerdict::Terminated { status, result } => Self::new(status, result),
+            EngineVerdict::Ongoing => None,
+        }
+    }
+
     /// The termination cause (the Conclusion's `content`).
     #[inline]
     #[must_use]
@@ -73,84 +141,239 @@ impl KernelResult {
     /// The result distribution.
     #[inline]
     #[must_use]
-    pub const fn result(&self) -> Outcome3 {
-        self.result
+    pub const fn outcome(&self) -> Outcome3 {
+        self.outcome
     }
 
     /// The score (`0`, `50`, or `100`) assigned to `side` — the value of the
-    /// player's `result` tag.
+    /// player's `result` tag ([`Outcome3::points`], on the seat axis).
     #[inline]
     #[must_use]
     pub const fn score(&self, side: Side) -> u8 {
-        match (self.result, side) {
-            (Outcome3::Draw, _) => 50,
-            (Outcome3::FirstWins, Side::First) | (Outcome3::SecondWins, Side::Second) => 100,
-            _ => 0,
+        let (first, second) = self.outcome.points();
+        match side {
+            Side::First => first,
+            Side::Second => second,
         }
     }
 
-    /// The result as the engine expresses a verdict.
+    /// The two `result` tags of a Conclusion carrying this verdict — one
+    /// `(player, score)` per player, `first` then `second` — for a publisher;
+    /// the inverse of [`SessionParams::outcome_from_scores`].
     #[inline]
     #[must_use]
-    pub const fn verdict(&self) -> Verdict {
-        Verdict::Terminated {
-            status: self.status,
-            result: self.result,
-        }
+    pub fn scores(&self, params: &SessionParams) -> [(PublicKey, u8); 2] {
+        [
+            (params.player(Side::First), self.score(Side::First)),
+            (params.player(Side::Second), self.score(Side::Second)),
+        ]
     }
+}
 
-    /// Builds a result from a terminal verdict, or `None` if the verdict is
-    /// `Ongoing` (unreachable from [`kernel_result`], kept as a defensive seam).
+/// Why no verdict is defined — for an invocation ([`verdict_at`]) or for a
+/// Conclusion ([`expected_verdict`], [`check`]). Consumers must tell the
+/// transient reason from the final ones: only a pending Conclusion may still
+/// become effective.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NoVerdict {
+    /// The Conclusion references another Game Session (kind `3425` §Semantic
+    /// constraints, item 2): invalid here, whatever it is elsewhere.
+    OtherSession,
+    /// The Conclusion's signer is not one of the session's two players (item
+    /// 3): invalid, and to be ignored for good.
+    NotAPlayer,
+    /// The Conclusion has no canonical timing yet — in attested mode, no
+    /// attestation by the designated timestamper — so its cutoff is undefined
+    /// and its verdict cannot be checked: **pending**, to be re-examined once
+    /// timed (kind `3425` §Until the Conclusion has canonical timing).
+    Pending,
+    /// The cutoff precedes t₀ (kind `3425` §Signing party and §Semantic
+    /// constraints, item 9; kind `3422` §Canonical session start): a session
+    /// cannot be concluded before it is playable, and the kernel is not
+    /// invoked before it. Final for a Conclusion: a canonical timing can only
+    /// move *earlier* (meta-resolution keeps the smallest attestation), never
+    /// later, so a Conclusion timed before t₀ stays there.
+    BeforeStart,
+    /// The replay hit a broken internal invariant
+    /// ([`crate::natural_state::ChainEnd::Inconsistent`]): no verdict is
+    /// defined, and the session must be treated as unresolved rather than
+    /// concluded.
+    Inconsistent,
+}
+
+impl NoVerdict {
+    /// Whether the Conclusion may still become effective: only a pending one.
     #[inline]
-    fn from_verdict(verdict: Verdict) -> Option<Self> {
-        match verdict {
-            Verdict::Terminated { status, result } => Some(Self { status, result }),
-            Verdict::Ongoing => None,
+    #[must_use]
+    pub const fn is_transient(self) -> bool {
+        matches!(self, Self::Pending)
+    }
+}
+
+impl core::fmt::Display for NoVerdict {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::OtherSession => f.write_str("the Conclusion references another session"),
+            Self::NotAPlayer => f.write_str("the Conclusion is not signed by a session player"),
+            Self::Pending => f.write_str("the Conclusion has no canonical timing yet"),
+            Self::BeforeStart => f.write_str("the cutoff precedes the session start"),
+            Self::Inconsistent => {
+                f.write_str("the replay hit a broken internal invariant; no verdict is defined")
+            }
         }
     }
 }
 
-/// The verdict the rule system yields for the session's public events at the
-/// Conclusion's cutoff, with its signer as the invoker. The Conclusion's own
-/// claim is not read: this is what it *should* claim.
+impl core::error::Error for NoVerdict {}
+
+/// The verdict the rule system yields for the session's public events at
+/// `cutoff`, with `invoker` as the concluding side (Kernel — Sanki §II.1's
+/// invocation): the natural state's terminal verdict if the replay reached
+/// one, otherwise the invocation resolved on the ongoing end position — draw
+/// acceptance, abandonment timeout, residual resignation, in that order.
 ///
-/// Returns `None` when no result is defined: the Conclusion references another
-/// session or is signed by a non-player (kind `3425` §Semantic constraints,
-/// items 2–3), or it has no canonical timing yet (pending).
-#[must_use]
-pub fn kernel_result(
+/// Defined for every cutoff at or after t₀ (a session is not playable before
+/// it, and a Conclusion timed before it concludes nothing), but for a replay
+/// that hit a broken invariant.
+///
+/// # Errors
+///
+/// [`NoVerdict::BeforeStart`] when `cutoff` precedes [`SessionParams::start`];
+/// [`NoVerdict::Inconsistent`] when the replay cannot define a verdict.
+pub fn verdict_at(
+    params: &SessionParams,
+    plies: &[Ply],
+    attestations: &[Attestation],
+    invoker: Side,
+    cutoff: Timestamp,
+) -> Result<Verdict, NoVerdict> {
+    if cutoff < params.start() {
+        return Err(NoVerdict::BeforeStart);
+    }
+    let natural = natural_state(params, plies, attestations, cutoff);
+    resolve_play(params, &natural, invoker)
+}
+
+/// The invocation a Conclusion fixes — its signer's side and its canonical
+/// timing — once the Conclusion is in reach: this session, a player signer,
+/// timed, and timed at or after t₀.
+///
+/// # Errors
+///
+/// [`NoVerdict::OtherSession`], [`NoVerdict::NotAPlayer`],
+/// [`NoVerdict::Pending`] (transient) or [`NoVerdict::BeforeStart`], checked
+/// in that order — so the first reason reported is the one that holds
+/// whatever later happens to the Conclusion's timing.
+pub fn cutoff_of(
+    params: &SessionParams,
+    attestations: &[Attestation],
+    conclusion: &Conclusion,
+) -> Result<(Side, Timestamp), NoVerdict> {
+    // A Conclusion for another session is out of reach (kind 3425 §Semantic
+    // constraints, item 2): a cross-session Conclusion must never resolve as a
+    // resignation here.
+    if conclusion.session != params.session() {
+        return Err(NoVerdict::OtherSession);
+    }
+    // A Conclusion from a non-player is invalid (item 3).
+    let invoker = params
+        .side_of(conclusion.signer)
+        .ok_or(NoVerdict::NotAPlayer)?;
+    // No canonical timing, no cutoff: pending.
+    let cutoff = canonical_timing(
+        attestations,
+        conclusion.id,
+        conclusion.created_at,
+        params.timestamper(),
+    )
+    .ok_or(NoVerdict::Pending)?;
+    // A Conclusion timed before t₀ concludes nothing (item 9): the session
+    // was not playable yet — no Ply is valid before t₀ either.
+    if cutoff < params.start() {
+        return Err(NoVerdict::BeforeStart);
+    }
+    Ok((invoker, cutoff))
+}
+
+/// The verdict the rule system yields at a Conclusion's cutoff, with its
+/// signer as the invoker — what the Conclusion is *expected* to claim, and
+/// what a conforming Conclusion there carries. Its own claim is not read.
+///
+/// # Errors
+///
+/// [`NoVerdict`] when no verdict is defined: another session, a non-player
+/// signer, a pending Conclusion, a Conclusion timed before t₀, or an
+/// inconsistent replay.
+pub fn expected_verdict(
     params: &SessionParams,
     plies: &[Ply],
     attestations: &[Attestation],
     conclusion: &Conclusion,
-) -> Option<KernelResult> {
-    // A Conclusion for another session is out of reach (kind 3425 §Semantic
-    // constraints, item 2): no result — a cross-session Conclusion must never
-    // resolve as a resignation here.
-    if conclusion.session != params.session() {
-        return None;
-    }
-
-    // A Conclusion from a non-player is invalid (item 3): no result.
-    let invoker = params.side_of(conclusion.signer)?;
-
-    // The natural state is also the gate: no canonical timing, no cutoff, no
-    // result. The replay has already selected and applied the chain.
-    let natural = natural_state(params, plies, attestations, conclusion)?;
-
-    let verdict = resolve_play(params, &natural, conclusion, invoker);
-    KernelResult::from_verdict(verdict)
+) -> Result<Verdict, NoVerdict> {
+    let (invoker, cutoff) = cutoff_of(params, attestations, conclusion)?;
+    verdict_at(params, plies, attestations, invoker, cutoff)
 }
 
-/// Whether `conclusion` is **conforming on the rules axis** — kind `3425`
-/// §Semantic constraints, item 8: it has canonical timing, and the verdict it
-/// claims equals the one the rule system yields at its cutoff. The structural
-/// constraints (items 1–7: tags, players, seats, the `nonce`) are the caller's
-/// cross-event validation, performed before the event reaches this crate.
-///
-/// `false` for a pending Conclusion (no cutoff yet) as much as for a wrong
-/// claim: neither terminates the session *now*. A caller that needs to tell the
-/// two apart reads [`kernel_result`] directly.
+/// The outcome of checking a Conclusion on the rules axis — kind `3425`
+/// §Semantic constraints, item 8. The constraints the cutoff depends on are
+/// re-checked here (items 2, 3 and 9 — this session, a player signer, timed
+/// at or after t₀ — the [`NoVerdict`] reasons); the other structural
+/// constraints (the tags, the `p` and `seat` mirrors, the `nonce`) are the
+/// caller's cross-event validation, performed before the event reaches this
+/// crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Check {
+    /// The claim equals the verdict the rule system yields at the cutoff: the
+    /// Conclusion is conforming and, if canonical ([`select_conclusion`]),
+    /// terminates the session.
+    Conforming(Verdict),
+    /// The claim differs from the verdict the rule system yields:
+    /// non-conforming, of no effect, whatever its timing. `expected` is what a
+    /// conforming Conclusion at this cutoff would carry.
+    Wrong {
+        /// The verdict the Conclusion claims.
+        claimed: Verdict,
+        /// The verdict the rule system yields at its cutoff.
+        expected: Verdict,
+    },
+    /// No verdict is defined for the Conclusion — see [`NoVerdict`]; only
+    /// [`NoVerdict::Pending`] may change.
+    NoVerdict(NoVerdict),
+}
+
+impl Check {
+    /// Whether the Conclusion is conforming.
+    #[inline]
+    #[must_use]
+    pub const fn is_conforming(&self) -> bool {
+        matches!(self, Self::Conforming(_))
+    }
+}
+
+/// Checks a Conclusion on the rules axis: [`Check::Conforming`] iff it has
+/// canonical timing and the verdict it claims equals the one the rule system
+/// yields at its cutoff (kind `3425` §Semantic constraints, item 8).
+#[must_use]
+pub fn check(
+    params: &SessionParams,
+    plies: &[Ply],
+    attestations: &[Attestation],
+    conclusion: &Conclusion,
+) -> Check {
+    match expected_verdict(params, plies, attestations, conclusion) {
+        Ok(expected) if expected == conclusion.claim => Check::Conforming(expected),
+        Ok(expected) => Check::Wrong {
+            claimed: conclusion.claim,
+            expected,
+        },
+        Err(reason) => Check::NoVerdict(reason),
+    }
+}
+
+/// Whether a Conclusion is conforming on the rules axis — [`check`] reduced to
+/// a boolean. `false` for a pending Conclusion as much as for a wrong claim:
+/// neither terminates the session *now*; a caller that must tell the two apart
+/// reads [`check`].
 #[inline]
 #[must_use]
 pub fn conforms(
@@ -159,40 +382,76 @@ pub fn conforms(
     attestations: &[Attestation],
     conclusion: &Conclusion,
 ) -> bool {
-    kernel_result(params, plies, attestations, conclusion)
-        .is_some_and(|result| result.verdict() == conclusion.claim())
+    check(params, plies, attestations, conclusion).is_conforming()
+}
+
+/// The session's canonical Conclusion, as [`select_conclusion`] returns it:
+/// the event, its cutoff, and the verdict it carries — so that a consumer
+/// (a rating authority, a client) needs no second replay to act on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalConclusion<'a> {
+    /// The canonical Conclusion.
+    pub conclusion: &'a Conclusion,
+    /// Its cutoff — its canonical timing, the instant the session was
+    /// concluded at (a terminal verdict may have been reached earlier).
+    pub cutoff: Timestamp,
+    /// The verdict it carries — equal to its claim, being conforming.
+    pub verdict: Verdict,
 }
 
 /// Selects the session's **canonical Conclusion** (kind `3425` §Idempotence
 /// and finality): among the conforming Conclusions — this session, a
-/// session-player signer, canonically timed, a correct claim — the earliest by
-/// canonical timing, smallest event id as tiebreaker. Returns `None` when no
-/// Conclusion is conforming yet: the session is still open.
+/// session-player signer, canonically timed at or after t₀, a correct claim —
+/// the earliest by canonical timing, smallest event id as tiebreaker.
+/// `Ok(None)` when no offered Conclusion conforms *with established timing*:
+/// the session is open for this consumer — still being played, or awaiting the
+/// timing of a pending Conclusion (Canonical Timing §The pending state).
 ///
 /// Every candidate is checked by a full replay, so the cost is linear in the
 /// number of Conclusions offered; a caller may pre-filter by session and signer
-/// to spare the replays of the obviously invalid ones.
-#[must_use]
+/// ([`cutoff_of`]) to spare the replays of the obviously invalid ones.
+///
+/// # Errors
+///
+/// [`NoVerdict::Inconsistent`] when the replay of any Conclusion in reach hit
+/// a broken internal invariant: the session is then unresolved for this
+/// consumer, and no other Conclusion is promoted in its place — an
+/// inconsistency is reported, never routed around. The out-of-reach reasons
+/// (another session, a non-player, pending, before t₀) merely exclude the
+/// Conclusion they concern, as a wrong claim does.
 pub fn select_conclusion<'a>(
     params: &SessionParams,
     plies: &[Ply],
     attestations: &[Attestation],
     conclusions: &'a [Conclusion],
-) -> Option<&'a Conclusion> {
-    conclusions
-        .iter()
-        .filter(|conclusion| conforms(params, plies, attestations, conclusion))
-        .filter_map(|conclusion| {
-            canonical_timing(
-                attestations,
-                conclusion.id,
-                conclusion.created_at,
-                params.timestamper(),
-            )
-            .map(|at| (at, conclusion))
-        })
-        .min_by(|(at_a, a), (at_b, b)| at_a.cmp(at_b).then_with(|| a.id.cmp(&b.id)))
-        .map(|(_, conclusion)| conclusion)
+) -> Result<Option<CanonicalConclusion<'a>>, NoVerdict> {
+    let mut canonical: Option<CanonicalConclusion<'a>> = None;
+    for conclusion in conclusions {
+        let Ok((invoker, cutoff)) = cutoff_of(params, attestations, conclusion) else {
+            continue;
+        };
+        // At a cutoff `cutoff_of` accepted, `verdict_at` answers `Inconsistent`
+        // or nothing: an inconsistency is propagated, never routed around.
+        let verdict = verdict_at(params, plies, attestations, invoker, cutoff)?;
+        if verdict != conclusion.claim {
+            continue;
+        }
+        let candidate = CanonicalConclusion {
+            conclusion,
+            cutoff,
+            verdict,
+        };
+        let earlier = match canonical {
+            None => true,
+            Some(held) => {
+                (candidate.cutoff, candidate.conclusion.id) < (held.cutoff, held.conclusion.id)
+            }
+        };
+        if earlier {
+            canonical = Some(candidate);
+        }
+    }
+    Ok(canonical)
 }
 
 /// The verdict the play produces: the natural state's terminal verdict if the
@@ -202,26 +461,29 @@ pub fn select_conclusion<'a>(
 fn resolve_play(
     params: &SessionParams,
     natural: &NaturalState<'_>,
-    conclusion: &Conclusion,
     invoker: Side,
-) -> Verdict {
+) -> Result<Verdict, NoVerdict> {
     let state = match &natural.end {
         // The replay terminated (a rule-system ending or a played-Ply timeout):
         // that is the verdict.
-        ChainEnd::Terminal(verdict, _at) => return *verdict,
+        ChainEnd::Terminal { verdict, .. } => return Ok(*verdict),
         // Still ongoing: resolve the invocation at the cutoff.
         ChainEnd::Ongoing(state) => state,
+        // No verdict is defined.
+        ChainEnd::Inconsistent => return Err(NoVerdict::Inconsistent),
     };
 
     // 2a. Draw acceptance: a standing offer accepted by the offeree.
-    if let Some(verdict) = draw_acceptance(params, natural, conclusion) {
-        return verdict;
+    if accepts_standing_offer(params, natural, invoker) {
+        return Ok(Verdict::AGREEMENT);
     }
 
     // 2b. Abandonment timeout: the player on move let their clock run out
     // before the cutoff (whether or not they are the invoker). The clock ticked
-    // is the one the replay produced, from the chain's last attestation — t₀ for
-    // an empty chain — to the cutoff.
+    // is the one the replay produced, from the chain's anchor — t₀ for an
+    // empty chain — to the cutoff. The anchor never rewinds (a tail premove's
+    // anterior timing does not move it back): time-accounting §Elapsed time,
+    // Kernel — Sanki §II.6.
     let on_move = state.position().active_side();
     let anchor = state.last_attestation();
     // `duration_since` answers `None` in two cases that must NOT be conflated —
@@ -237,12 +499,12 @@ fn resolve_play(
         None => Duration::from_secs(u64::MAX),
     };
     if tick(params.time_control(), state.clocks().get(on_move), elapsed).is_flagged() {
-        return Verdict::decisive(Status::Timeout, on_move);
+        return Ok(Verdict::timeout_against(on_move));
     }
 
     // 2c. Residual resignation: the invocation matches no other cause, so the
     // concluding player abandons — whatever the turn.
-    Verdict::decisive(Status::Resignation, invoker)
+    Ok(Verdict::resignation_by(invoker))
 }
 
 #[cfg(test)]
@@ -254,9 +516,12 @@ mod tests {
         clippy::indexing_slicing
     )]
 
-    use super::{conforms, kernel_result, select_conclusion};
+    use super::{
+        check, conforms, expected_verdict, select_conclusion, verdict_at, Check, NoVerdict, Verdict,
+    };
     use crate::event::{Attestation, Conclusion, EventId, Ply, PublicKey};
-    use crate::session::SessionParams;
+    use crate::session::{Seats, SessionParams};
+    use sashite_sanki_engine::domain::side::Side;
     use sashite_sanki_engine::domain::status::{Outcome3, Status};
     use sashite_sanki_engine::domain::time::{Duration, Timestamp};
     use sashite_sanki_engine::domain::time_control::{Period, TimeControl};
@@ -309,7 +574,7 @@ mod tests {
     }
 
     /// A Conclusion by `signer`, timed by attestation (its own `created_at` is
-    /// inert in attested mode). Its claim is a placeholder: `kernel_result`
+    /// inert in attested mode). Its claim is a placeholder: `expected_verdict`
     /// does not read it.
     fn conclusion(signer: u8) -> Conclusion {
         conclusion_at(signer, 0)
@@ -320,10 +585,14 @@ mod tests {
             eid(CONCLUSION),
             pk(signer),
             eid(SESSION),
-            Status::Resignation,
-            Outcome3::SecondWins,
+            verdict(Status::Resignation, Outcome3::SecondWins),
             ts(created_at),
         )
+    }
+
+    /// A coherent verdict value.
+    fn verdict(status: Status, outcome: Outcome3) -> Verdict {
+        Verdict::new(status, outcome).expect("a coherent verdict")
     }
 
     fn params(feen: &str, tc_secs: u64, anchor: i64) -> SessionParams {
@@ -331,12 +600,12 @@ mod tests {
         SessionParams::new(
             eid(SESSION),
             Some(pk(TIMESTAMPER)),
-            pk(FIRST),
-            pk(SECOND),
+            Seats::new(pk(FIRST), pk(SECOND)).expect("distinct"),
             TimeControl::new(period, Vec::new()),
             Position::parse(feen).expect("valid FEEN"),
             ts(anchor),
         )
+        .expect("first to move")
     }
 
     #[test]
@@ -345,9 +614,9 @@ mod tests {
         let plies = [ply(1, FIRST, 1, "[\"a1\",\"a8\",null]")];
         let atts = [att(101, 1, 100), att(171, CONCLUSION, 1000)];
         let p = params("7k^/6pp/8/8/8/8/8/R3K^3 / W/w", 600, 0);
-        let adj = kernel_result(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
+        let adj = expected_verdict(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
         assert_eq!(adj.status(), Status::Checkmate);
-        assert_eq!(adj.result(), Outcome3::FirstWins);
+        assert_eq!(adj.outcome(), Outcome3::FirstWins);
     }
 
     #[test]
@@ -360,9 +629,9 @@ mod tests {
         let plies = [ply(1, FIRST, 1, "[\"a1\",\"a4\",null]")];
         let atts = [att(101, 1, 100), att(171, CONCLUSION, 400)];
         let p = params("4k^3/8/8/8/8/8/8/4K^3 / W/w", 600, 0);
-        let adj = kernel_result(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
+        let adj = expected_verdict(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
         assert_eq!(adj.status(), Status::Resignation);
-        assert_eq!(adj.result(), Outcome3::FirstWins);
+        assert_eq!(adj.outcome(), Outcome3::FirstWins);
     }
 
     #[test]
@@ -382,9 +651,9 @@ mod tests {
             att(171, CONCLUSION, 400),
         ];
         let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
-        let adj = kernel_result(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
+        let adj = expected_verdict(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
         assert_eq!(adj.status(), Status::Resignation);
-        assert_eq!(adj.result(), Outcome3::FirstWins);
+        assert_eq!(adj.outcome(), Outcome3::FirstWins);
     }
 
     #[test]
@@ -394,9 +663,9 @@ mod tests {
         let plies = [ply(1, FIRST, 1, "[\"a1\",\"a4\",null]")];
         let atts = [att(101, 1, 100), att(171, CONCLUSION, 400)];
         let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
-        let adj = kernel_result(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
+        let adj = expected_verdict(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
         assert_eq!(adj.status(), Status::Resignation);
-        assert_eq!(adj.result(), Outcome3::FirstWins);
+        assert_eq!(adj.outcome(), Outcome3::FirstWins);
     }
 
     #[test]
@@ -407,9 +676,9 @@ mod tests {
         let plies = [ply(1, FIRST, 1, "[\"a1\",\"a4\",null]")];
         let atts = [att(101, 1, 100), att(171, CONCLUSION, 400)];
         let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
-        let adj = kernel_result(&p, &plies, &atts, &conclusion(FIRST)).expect("result");
+        let adj = expected_verdict(&p, &plies, &atts, &conclusion(FIRST)).expect("result");
         assert_eq!(adj.status(), Status::Resignation);
-        assert_eq!(adj.result(), Outcome3::SecondWins);
+        assert_eq!(adj.outcome(), Outcome3::SecondWins);
     }
 
     #[test]
@@ -421,9 +690,9 @@ mod tests {
         let plies = [ply_draw(1, FIRST, 1, "[\"a1\",\"a4\",null]")];
         let atts = [att(101, 1, 100), att(171, CONCLUSION, 1000)];
         let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
-        let adj = kernel_result(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
+        let adj = expected_verdict(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
         assert_eq!(adj.status(), Status::Agreement);
-        assert_eq!(adj.result(), Outcome3::Draw);
+        assert_eq!(adj.outcome(), Outcome3::Draw);
     }
 
     #[test]
@@ -433,9 +702,9 @@ mod tests {
         let plies = [ply(1, FIRST, 1, "[\"a1\",\"a4\",null]")];
         let atts = [att(101, 1, 100), att(171, CONCLUSION, 1000)];
         let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
-        let adj = kernel_result(&p, &plies, &atts, &conclusion(FIRST)).expect("result");
+        let adj = expected_verdict(&p, &plies, &atts, &conclusion(FIRST)).expect("result");
         assert_eq!(adj.status(), Status::Timeout);
-        assert_eq!(adj.result(), Outcome3::FirstWins);
+        assert_eq!(adj.outcome(), Outcome3::FirstWins);
     }
 
     #[test]
@@ -446,9 +715,9 @@ mod tests {
         let plies = [ply(1, FIRST, 1, "[\"a1\",\"a4\",null]")];
         let atts = [att(101, 1, 100), att(171, CONCLUSION, 1000)];
         let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
-        let adj = kernel_result(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
+        let adj = expected_verdict(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
         assert_eq!(adj.status(), Status::Timeout);
-        assert_eq!(adj.result(), Outcome3::FirstWins);
+        assert_eq!(adj.outcome(), Outcome3::FirstWins);
     }
 
     #[test]
@@ -458,9 +727,9 @@ mod tests {
         let plies: [Ply; 0] = [];
         let atts = [att(171, CONCLUSION, 400)];
         let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
-        let adj = kernel_result(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
+        let adj = expected_verdict(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
         assert_eq!(adj.status(), Status::Resignation);
-        assert_eq!(adj.result(), Outcome3::FirstWins);
+        assert_eq!(adj.outcome(), Outcome3::FirstWins);
     }
 
     #[test]
@@ -468,7 +737,11 @@ mod tests {
         let plies = [ply(1, FIRST, 1, "[\"a1\",\"a4\",null]")];
         let atts = [att(101, 1, 100)]; // no attestation for the Conclusion
         let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
-        assert!(kernel_result(&p, &plies, &atts, &conclusion(SECOND)).is_none());
+        assert_eq!(
+            expected_verdict(&p, &plies, &atts, &conclusion(SECOND)),
+            Err(NoVerdict::Pending)
+        );
+        assert!(NoVerdict::Pending.is_transient());
     }
 
     #[test]
@@ -477,7 +750,11 @@ mod tests {
         let plies = [ply(1, FIRST, 1, "[\"a1\",\"a4\",null]")];
         let atts = [att(101, 1, 100), att(171, CONCLUSION, 1000)];
         let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
-        assert!(kernel_result(&p, &plies, &atts, &conclusion(77)).is_none());
+        assert_eq!(
+            expected_verdict(&p, &plies, &atts, &conclusion(77)),
+            Err(NoVerdict::NotAPlayer)
+        );
+        assert!(!NoVerdict::NotAPlayer.is_transient());
     }
 
     #[test]
@@ -492,21 +769,29 @@ mod tests {
             eid(CONCLUSION),
             pk(SECOND),
             eid(51),
-            Status::Resignation,
-            Outcome3::FirstWins,
+            verdict(Status::Resignation, Outcome3::FirstWins),
             ts(0),
         );
-        assert!(kernel_result(&p, &plies, &atts, &foreign).is_none());
+        assert_eq!(
+            expected_verdict(&p, &plies, &atts, &foreign),
+            Err(NoVerdict::OtherSession)
+        );
     }
 
     /// A Conclusion with an explicit id and claim.
     fn claim(id: u8, signer: u8, status: Status, result: Outcome3) -> Conclusion {
-        Conclusion::new(eid(id), pk(signer), eid(SESSION), status, result, ts(0))
+        Conclusion::new(
+            eid(id),
+            pk(signer),
+            eid(SESSION),
+            verdict(status, result),
+            ts(0),
+        )
     }
 
     #[test]
-    fn conforms_iff_the_claim_is_the_kernel_result() {
-        // Ra1-a8 mates: the kernel result at any later cutoff is checkmate,
+    fn conforms_iff_the_claim_is_the_expected_verdict() {
+        // Ra1-a8 mates: the expected verdict at any later cutoff is checkmate,
         // first wins. A Conclusion claiming exactly that conforms; one claiming
         // anything else — the right status with the wrong split, the right
         // split with the wrong status — does not; a pending one does not either.
@@ -515,6 +800,8 @@ mod tests {
         let p = params("7k^/6pp/8/8/8/8/8/R3K^3 / W/w", 600, 0);
 
         let right = claim(CONCLUSION, SECOND, Status::Checkmate, Outcome3::FirstWins);
+        let right_result =
+            |p: &SessionParams| expected_verdict(p, &plies, &atts, &right).expect("in reach");
         assert!(conforms(&p, &plies, &atts, &right));
         // Whichever player signs it.
         let by_winner = claim(CONCLUSION, FIRST, Status::Checkmate, Outcome3::FirstWins);
@@ -530,7 +817,24 @@ mod tests {
         // Pending: no attestation of the Conclusion, hence no cutoff.
         let unattested = [att(101, 1, 100)];
         assert!(!conforms(&p, &plies, &unattested, &right));
-        assert!(kernel_result(&p, &plies, &unattested, &right).is_none());
+        assert_eq!(
+            check(&p, &plies, &unattested, &right),
+            Check::NoVerdict(NoVerdict::Pending)
+        );
+        // `check` tells a wrong claim from an unreachable one, and says what
+        // a conforming Conclusion would have carried.
+        match check(&p, &plies, &atts, &wrong_split) {
+            Check::Wrong { claimed, expected } => {
+                assert_eq!(claimed, wrong_split.claim);
+                assert_eq!(expected.status(), Status::Checkmate);
+                assert_eq!(expected.outcome(), Outcome3::FirstWins);
+            }
+            other => panic!("expected a wrong claim, got {other:?}"),
+        }
+        assert_eq!(
+            check(&p, &plies, &atts, &right),
+            Check::Conforming(right_result(&p))
+        );
 
         // A non-player's claim never conforms, however right it looks.
         let stranger = claim(CONCLUSION, 77, Status::Checkmate, Outcome3::FirstWins);
@@ -577,8 +881,7 @@ mod tests {
                 eid(175),
                 pk(FIRST),
                 eid(51),
-                Status::Checkmate,
-                Outcome3::FirstWins,
+                verdict(Status::Checkmate, Outcome3::FirstWins),
                 ts(0),
             ),
             // Conforming but unattested: pending, skipped.
@@ -591,9 +894,12 @@ mod tests {
             att(203, 174, 150),
             att(204, 175, 100),
         ];
-        let selected =
-            select_conclusion(&p, &plies, &atts, &conclusions).expect("a conclusion rules");
-        assert_eq!(*selected.id.as_bytes(), [172; 32]);
+        let selected = select_conclusion(&p, &plies, &atts, &conclusions)
+            .expect("consistent")
+            .expect("a conclusion rules");
+        assert_eq!(*selected.conclusion.id.as_bytes(), [172; 32]);
+        assert_eq!(selected.cutoff, ts(200));
+        assert_eq!(selected.verdict.status(), Status::Checkmate);
 
         // Tie on timing: the smallest event id rules.
         let tied = [
@@ -601,14 +907,18 @@ mod tests {
             claim(178, SECOND, Status::Checkmate, Outcome3::FirstWins),
         ];
         let tied_atts = [att(101, 1, 100), att(211, 180, 500), att(212, 178, 500)];
-        let selected =
-            select_conclusion(&p, &plies, &tied_atts, &tied).expect("a conclusion rules");
-        assert_eq!(*selected.id.as_bytes(), [178; 32]);
+        let selected = select_conclusion(&p, &plies, &tied_atts, &tied)
+            .expect("consistent")
+            .expect("a conclusion rules");
+        assert_eq!(*selected.conclusion.id.as_bytes(), [178; 32]);
 
         // No conforming timed Conclusion at all: the session stays open.
-        assert!(select_conclusion(&p, &plies, &atts, &conclusions[2..]).is_none());
+        assert_eq!(
+            select_conclusion(&p, &plies, &atts, &conclusions[2..]),
+            Ok(None)
+        );
         let empty: [Conclusion; 0] = [];
-        assert!(select_conclusion(&p, &plies, &atts, &empty).is_none());
+        assert_eq!(select_conclusion(&p, &plies, &atts, &empty), Ok(None));
     }
 
     #[test]
@@ -627,9 +937,13 @@ mod tests {
         assert!(conforms(&p, &plies, &atts, &premature));
         assert!(conforms(&p, &plies, &atts, &on_time));
         let offered = [on_time, premature];
-        let selected = select_conclusion(&p, &plies, &atts, &offered).expect("a conclusion rules");
-        assert_eq!(*selected.id.as_bytes(), [172; 32]);
-        assert_eq!(selected.status, Status::Resignation);
+        let selected = select_conclusion(&p, &plies, &atts, &offered)
+            .expect("consistent")
+            .expect("a conclusion rules");
+        assert_eq!(*selected.conclusion.id.as_bytes(), [172; 32]);
+        assert_eq!(selected.cutoff, ts(400));
+        assert_eq!(selected.verdict.status(), Status::Resignation);
+        assert_eq!(selected.verdict.outcome(), Outcome3::FirstWins);
     }
 
     #[test]
@@ -652,23 +966,23 @@ mod tests {
         let cases = [
             // A back-rank mate: the first player wins.
             (
-                kernel_result(&mate, &mating, &mate_atts, &conclusion(SECOND)),
+                expected_verdict(&mate, &mating, &mate_atts, &conclusion(SECOND)),
                 Outcome3::FirstWins,
             ),
             // The first player invokes with nothing else to rule on: they resign.
             (
-                kernel_result(&p, &none, &empty_atts, &conclusion(FIRST)),
+                expected_verdict(&p, &none, &empty_atts, &conclusion(FIRST)),
                 Outcome3::SecondWins,
             ),
             // The second player accepts the first player's offer.
             (
-                kernel_result(&p, &offer, &offer_atts, &conclusion(SECOND)),
+                expected_verdict(&p, &offer, &offer_atts, &conclusion(SECOND)),
                 Outcome3::Draw,
             ),
         ];
         for (result, expected) in cases {
             let result = result.expect("a result");
-            assert_eq!(result.result(), expected);
+            assert_eq!(result.outcome(), expected);
             let (first, second) = expected.points();
             assert_eq!(result.score(Side::First), first, "{expected:?} first");
             assert_eq!(result.score(Side::Second), second, "{expected:?} second");
@@ -695,9 +1009,9 @@ mod tests {
         let atts = [att(171, CONCLUSION, i64::MAX)];
 
         let fits = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
-        let adj = kernel_result(&fits, &plies, &atts, &conclusion(SECOND)).expect("result");
+        let adj = expected_verdict(&fits, &plies, &atts, &conclusion(SECOND)).expect("result");
         assert_eq!(adj.status(), Status::Timeout);
-        assert_eq!(adj.result(), Outcome3::SecondWins);
+        assert_eq!(adj.outcome(), Outcome3::SecondWins);
 
         let overflows = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, -1);
         assert_eq!(
@@ -705,25 +1019,43 @@ mod tests {
             None,
             "the span must be the one that overflows"
         );
-        let adj = kernel_result(&overflows, &plies, &atts, &conclusion(SECOND)).expect("result");
+        let adj = expected_verdict(&overflows, &plies, &atts, &conclusion(SECOND)).expect("result");
         assert_eq!(adj.status(), Status::Timeout);
-        assert_eq!(adj.result(), Outcome3::SecondWins);
+        assert_eq!(adj.outcome(), Outcome3::SecondWins);
     }
 
     #[test]
-    fn cutoff_before_t0_charges_nothing() {
-        // The other `None` branch: a Conclusion canonically timed BEFORE t₀. The
-        // span is negative, so the clock is charged nothing (`elapsed =
-        // max(0, cutoff − T)`, time-accounting §Elapsed time) — no `timeout`,
-        // and the invocation falls through to the residual resignation. No Ply
-        // qualifies either (a candidate needs `t₀ ≤ at ≤ cutoff`), so the chain
-        // is empty.
+    fn a_conclusion_timed_before_t0_concludes_nothing() {
+        // A Conclusion canonically timed BEFORE t₀ (a scheduled start the
+        // signer jumped): out of reach, finally — its timing will never move
+        // — and never a resignation.
         let plies = [ply(1, FIRST, 1, "[\"a1\",\"a4\",null]")];
         let atts = [att(101, 1, 1100), att(171, CONCLUSION, 500)];
         let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 1000);
-        let adj = kernel_result(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
-        assert_eq!(adj.status(), Status::Resignation);
-        assert_eq!(adj.result(), Outcome3::FirstWins);
+        assert_eq!(
+            expected_verdict(&p, &plies, &atts, &conclusion(SECOND)),
+            Err(NoVerdict::BeforeStart)
+        );
+        assert!(!NoVerdict::BeforeStart.is_transient());
+        assert!(!conforms(
+            &p,
+            &plies,
+            &atts,
+            &claim(CONCLUSION, SECOND, Status::Resignation, Outcome3::FirstWins)
+        ));
+        // The kernel is not invoked before t₀ either: a client probing "what
+        // if I conclude now" ahead of a scheduled start is told so, not told
+        // it would resign.
+        assert_eq!(
+            verdict_at(&p, &plies, &atts, Side::Second, ts(500)),
+            Err(NoVerdict::BeforeStart)
+        );
+        // At t₀ exactly the Conclusion is in reach: an empty chain (the Ply
+        // @1100 is past the cutoff), nothing charged, the residual resignation.
+        let at_start = [att(101, 1, 1100), att(171, CONCLUSION, 1000)];
+        let r = expected_verdict(&p, &plies, &at_start, &conclusion(SECOND)).expect("in reach");
+        assert_eq!(r.status(), Status::Resignation);
+        assert_eq!(r.outcome(), Outcome3::FirstWins);
     }
 
     #[test]
@@ -737,14 +1069,14 @@ mod tests {
         let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
 
         let atts = [att(171, CONCLUSION, 600)];
-        let adj = kernel_result(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
+        let adj = expected_verdict(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
         assert_eq!(adj.status(), Status::Resignation);
 
         let atts = [att(171, CONCLUSION, 601)];
         for invoker in [FIRST, SECOND] {
-            let adj = kernel_result(&p, &plies, &atts, &conclusion(invoker)).expect("result");
+            let adj = expected_verdict(&p, &plies, &atts, &conclusion(invoker)).expect("result");
             assert_eq!(adj.status(), Status::Timeout);
-            assert_eq!(adj.result(), Outcome3::SecondWins);
+            assert_eq!(adj.outcome(), Outcome3::SecondWins);
         }
     }
 
@@ -766,14 +1098,14 @@ mod tests {
             let p = SessionParams::new(
                 eid(SESSION),
                 Some(pk(TIMESTAMPER)),
-                pk(FIRST),
-                pk(SECOND),
+                Seats::new(pk(FIRST), pk(SECOND)).expect("distinct"),
                 TimeControl::new(main, vec![overtime]),
                 Position::parse("4k^3/8/8/8/8/8/8/R3K^3 / W/w").expect("valid FEEN"),
                 ts(0),
-            );
+            )
+            .expect("first to move");
             let atts = [att(171, CONCLUSION, cutoff)];
-            let adj = kernel_result(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
+            let adj = expected_verdict(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
             assert_eq!(adj.status(), expected, "cutoff {cutoff}");
         }
     }
@@ -797,23 +1129,23 @@ mod tests {
             let p = SessionParams::new(
                 eid(SESSION),
                 Some(pk(TIMESTAMPER)),
-                pk(FIRST),
-                pk(SECOND),
+                Seats::new(pk(FIRST), pk(SECOND)).expect("distinct"),
                 TimeControl::new(period, Vec::new()),
                 Position::parse("4k^3/8/8/8/8/8/8/R3K^3 / W/w").expect("valid FEEN"),
                 ts(0),
-            );
+            )
+            .expect("first to move");
             let atts = [
                 att(101, 1, 10),
                 att(102, 2, 20),
                 att(103, 3, 30),
                 att(171, CONCLUSION, cutoff),
             ];
-            let adj = kernel_result(&p, &plies, &atts, &conclusion(FIRST)).expect("result");
+            let adj = expected_verdict(&p, &plies, &atts, &conclusion(FIRST)).expect("result");
             assert_eq!(adj.status(), expected, "cutoff {cutoff}");
             if expected == Status::Timeout {
                 // Charged to the second player, who is on move — not to the invoker.
-                assert_eq!(adj.result(), Outcome3::FirstWins);
+                assert_eq!(adj.outcome(), Outcome3::FirstWins);
             }
         }
     }
@@ -841,15 +1173,13 @@ mod tests {
                 .take(prefix)
                 .map(|&(id, signer, step, content)| ply(id, signer, step, content))
                 .collect();
-            let mut atts: Vec<Attestation> = moves
+            let atts: Vec<Attestation> = moves
                 .iter()
                 .take(prefix)
                 .enumerate()
                 .map(|(i, &(id, _, _, _))| att(100_u8.wrapping_add(id), id, 100 * (i as i64 + 1)))
                 .collect();
-            atts.push(att(171, CONCLUSION, 10_000));
-            let ns =
-                natural_state(&p, &plies, &atts, &conclusion(FIRST)).expect("attested conclusion");
+            let ns = natural_state(&p, &plies, &atts, ts(10_000));
             assert_eq!(ns.chain.len(), prefix);
             match &ns.end {
                 ChainEnd::Ongoing(state) => assert_eq!(
@@ -857,7 +1187,9 @@ mod tests {
                     p.side_at(ns.next_half_move()),
                     "turn/play-order divergence after {prefix} half-moves"
                 ),
-                ChainEnd::Terminal(..) => panic!("the chain must stay ongoing"),
+                ChainEnd::Terminal { .. } | ChainEnd::Inconsistent => {
+                    panic!("the chain must stay ongoing")
+                }
             }
         }
     }
@@ -870,27 +1202,28 @@ mod tests {
         let plies = [ply_draw(1, FIRST, 1, "[\"a1\",\"a8\",null]")];
         let atts = [att(101, 1, 100), att(171, CONCLUSION, 300)];
         let p = params("7k^/6pp/8/8/8/8/8/R3K^3 / W/w", 600, 0);
-        let adj = kernel_result(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
+        let adj = expected_verdict(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
         assert_eq!(adj.status(), Status::Checkmate);
-        assert_eq!(adj.result(), Outcome3::FirstWins);
+        assert_eq!(adj.outcome(), Outcome3::FirstWins);
     }
 
     #[test]
     fn self_timed_session_rules_on_the_events_own_created_at() {
-        // No designated timestamper: each event's relay-enforced `created_at` IS
+        // No designated timestamper: each event's own `created_at` (as accepted
+        // by a designated timing relay — the caller's precondition) IS
         // its canonical timing, and any attestation present is inert. The Conclusion
-        // therefore always has a cutoff — `kernel_result` never withholds a
+        // therefore always has a cutoff — `expected_verdict` never withholds a
         // result for want of one.
         let period = Period::new(Duration::from_secs(600), None, None).expect("period");
         let p = SessionParams::new(
             eid(SESSION),
             None, // self-timed
-            pk(FIRST),
-            pk(SECOND),
+            Seats::new(pk(FIRST), pk(SECOND)).expect("distinct"),
             TimeControl::new(period, Vec::new()),
             Position::parse("4k^3/8/8/8/8/8/8/R3K^3 / W/w").expect("valid FEEN"),
             ts(0),
-        );
+        )
+        .expect("first to move");
         let plies = [Ply::new(
             eid(1),
             pk(FIRST),
@@ -903,18 +1236,21 @@ mod tests {
         let no_atts: [Attestation; 0] = [];
 
         // Within time: the residual resignation, against the invoker.
-        let adj = kernel_result(&p, &plies, &no_atts, &conclusion_at(SECOND, 400)).expect("result");
+        let adj =
+            expected_verdict(&p, &plies, &no_atts, &conclusion_at(SECOND, 400)).expect("result");
         assert_eq!(adj.status(), Status::Resignation);
-        assert_eq!(adj.result(), Outcome3::FirstWins);
+        assert_eq!(adj.outcome(), Outcome3::FirstWins);
 
         // Past the second player's budget (701 − 100 > 600): the abandonment.
-        let adj = kernel_result(&p, &plies, &no_atts, &conclusion_at(SECOND, 701)).expect("result");
+        let adj =
+            expected_verdict(&p, &plies, &no_atts, &conclusion_at(SECOND, 701)).expect("result");
         assert_eq!(adj.status(), Status::Timeout);
-        assert_eq!(adj.result(), Outcome3::FirstWins);
+        assert_eq!(adj.outcome(), Outcome3::FirstWins);
 
         // A stray attestation cannot move a self-timed cutoff.
         let stray = [att(171, CONCLUSION, 100_000)];
-        let adj = kernel_result(&p, &plies, &stray, &conclusion_at(SECOND, 400)).expect("result");
+        let adj =
+            expected_verdict(&p, &plies, &stray, &conclusion_at(SECOND, 400)).expect("result");
         assert_eq!(adj.status(), Status::Resignation);
     }
 
@@ -927,7 +1263,7 @@ mod tests {
         let atts = [att(101, 1, 100), att(171, CONCLUSION, 400)];
         let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
 
-        let control = kernel_result(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
+        let control = expected_verdict(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
         assert_eq!(control.status(), Status::Resignation);
 
         // Item 3 — a signer who is not a session player: a bystander, the
@@ -944,12 +1280,12 @@ mod tests {
                 eid(CONCLUSION),
                 signer,
                 eid(SESSION),
-                Status::Resignation,
-                Outcome3::FirstWins,
+                verdict(Status::Resignation, Outcome3::FirstWins),
                 ts(0),
             );
-            assert!(
-                kernel_result(&p, &plies, &atts, &foreign).is_none(),
+            assert_eq!(
+                expected_verdict(&p, &plies, &atts, &foreign),
+                Err(NoVerdict::NotAPlayer),
                 "signer {signer} must not obtain a result"
             );
             assert!(!conforms(&p, &plies, &atts, &foreign));
@@ -963,11 +1299,13 @@ mod tests {
                 eid(CONCLUSION),
                 pk(SECOND),
                 session,
-                Status::Resignation,
-                Outcome3::FirstWins,
+                verdict(Status::Resignation, Outcome3::FirstWins),
                 ts(0),
             );
-            assert!(kernel_result(&p, &plies, &atts, &foreign).is_none());
+            assert_eq!(
+                expected_verdict(&p, &plies, &atts, &foreign),
+                Err(NoVerdict::OtherSession)
+            );
         }
     }
 
@@ -994,7 +1332,13 @@ mod tests {
             att(106, 6, 300),
             att(171, CONCLUSION, 400),
         ];
-        let reference = kernel_result(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
+        let reference = expected_verdict(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
+        // The reference itself: a4 fills slot 1 (earliest legal live move),
+        // second's premoved offer fills slot 2 (the illegal e6 is skipped),
+        // a4-a5 fills slot 3 — so the offer is not the tail and the second
+        // player's invocation within time is their own resignation.
+        assert_eq!(reference.status(), Status::Resignation);
+        assert_eq!(reference.outcome(), Outcome3::FirstWins);
 
         // A deterministic LCG shuffle — no dev-dependency, no wall-clock seed.
         let mut seed = 0x2545_F491_4F6C_DD1D_u64;
@@ -1014,10 +1358,152 @@ mod tests {
                 shuffled_atts.swap(i, next() % (i + 1));
             }
             assert_eq!(
-                kernel_result(&p, &shuffled_plies, &shuffled_atts, &conclusion(SECOND)),
-                Some(reference),
+                expected_verdict(&p, &shuffled_plies, &shuffled_atts, &conclusion(SECOND)),
+                Ok(reference),
                 "round {round}: the verdict moved with the input order"
             );
+        }
+    }
+
+    #[test]
+    fn verdict_at_is_the_invocation_primitive() {
+        // `verdict_at` takes a side and an instant directly — no synthetic
+        // Conclusion. A back-rank mate is a first-player win at any later
+        // cutoff, whoever "invokes"; before any clock expires, a bare
+        // invocation by a side is that side's own resignation.
+        let mate = params("7k^/6pp/8/8/8/8/8/R3K^3 / W/w", 600, 0);
+        let mating = [ply(1, FIRST, 1, "[\"a1\",\"a8\",null]")];
+        let atts = [att(101, 1, 100)];
+        for invoker in [Side::First, Side::Second] {
+            let r = verdict_at(&mate, &mating, &atts, invoker, ts(1000)).expect("defined");
+            assert_eq!(r.status(), Status::Checkmate);
+            assert_eq!(r.outcome(), Outcome3::FirstWins);
+        }
+
+        let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
+        let none: [Ply; 0] = [];
+        let empty: [Attestation; 0] = [];
+        // A client probing "what if I conclude now" reads its own resignation.
+        let r = verdict_at(&p, &none, &empty, Side::First, ts(400)).expect("defined");
+        assert_eq!(r.status(), Status::Resignation);
+        assert_eq!(r.outcome(), Outcome3::SecondWins);
+        // The score accessor and the seat-axis `scores` agree with the split.
+        assert_eq!(r.score(Side::First), 0);
+        assert_eq!(r.score(Side::Second), 100);
+        let scores = r.scores(&p);
+        assert_eq!(scores[0], (p.player(Side::First), 0));
+        assert_eq!(scores[1], (p.player(Side::Second), 100));
+        // …and round-trips through the seat-axis mapping.
+        assert_eq!(p.outcome_from_scores(scores), Some(r.outcome()));
+    }
+
+    #[test]
+    fn abandonment_is_charged_from_the_chains_last_anchor_not_a_tail_premoves_timing() {
+        // first moves @100 (500 s left of 600); second's reply is a PREMOVE
+        // timed @50 (anterior to the boundary 100), selected and applied. The
+        // chain's last anchor is 100 — the boundary never rewinds to the
+        // premove's timing — so first, on move again, flags at a cutoff
+        // strictly past 100 + 500 = 600. Charged from the premove's own timing
+        // (50) the flag would fall at 551: the two readings differ by exactly
+        // the premove's anteriority (Kernel — Sanki §II.6; time-accounting
+        // §Elapsed time).
+        let plies = [
+            ply(1, FIRST, 1, "[\"a1\",\"a4\",null]"),
+            ply(2, SECOND, 1, "[\"e8\",\"e7\",null]"),
+        ];
+        let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
+        for (cutoff, expected) in [
+            (551_i64, Status::Resignation),
+            (600, Status::Resignation),
+            (601, Status::Timeout),
+        ] {
+            let atts = [
+                att(101, 1, 100),
+                att(102, 2, 50),
+                att(171, CONCLUSION, cutoff),
+            ];
+            let natural = crate::natural_state::natural_state(&p, &plies, &atts, ts(cutoff));
+            assert_eq!(
+                natural.chain.len(),
+                2,
+                "cutoff {cutoff}: the premove is applied"
+            );
+            let r = expected_verdict(&p, &plies, &atts, &conclusion(SECOND)).expect("in reach");
+            assert_eq!(r.status(), expected, "cutoff {cutoff}");
+            if expected == Status::Timeout {
+                assert_eq!(r.outcome(), Outcome3::SecondWins, "against first, on move");
+            }
+        }
+    }
+
+    #[test]
+    fn a_played_ply_timeout_outranks_the_mate_it_delivers() {
+        // Ra1-a8 mates — but the mover's 600 s budget was already spent when
+        // the Ply was timed (@700): the played-Ply timeout is the termination,
+        // against the mover, and the mate on the board changes nothing
+        // (time-accounting §The two timeout flavours).
+        let plies = [ply(1, FIRST, 1, "[\"a1\",\"a8\",null]")];
+        let atts = [att(101, 1, 700), att(171, CONCLUSION, 1000)];
+        let p = params("7k^/6pp/8/8/8/8/8/R3K^3 / W/w", 600, 0);
+        let r = expected_verdict(&p, &plies, &atts, &conclusion(SECOND)).expect("in reach");
+        assert_eq!(r.status(), Status::Timeout);
+        assert_eq!(r.outcome(), Outcome3::SecondWins);
+        // One second earlier the same Ply is a mate.
+        let atts = [att(101, 1, 600), att(171, CONCLUSION, 1000)];
+        let r = expected_verdict(&p, &plies, &atts, &conclusion(SECOND)).expect("in reach");
+        assert_eq!(r.status(), Status::Checkmate);
+        assert_eq!(r.outcome(), Outcome3::FirstWins);
+    }
+
+    #[test]
+    fn select_conclusion_in_self_timed_mode_reads_the_events_own_timing() {
+        // No timestamper: each Conclusion's `created_at` is its cutoff. Two
+        // conforming Conclusions — first's honest resignation @400 and
+        // second's win on time @1000 — the earliest rules.
+        let period = Period::new(Duration::from_secs(600), None, None).expect("period");
+        let p = SessionParams::new(
+            eid(SESSION),
+            None,
+            Seats::new(pk(FIRST), pk(SECOND)).expect("distinct"),
+            TimeControl::new(period, Vec::new()),
+            Position::parse("4k^3/8/8/8/8/8/8/R3K^3 / W/w").expect("valid FEEN"),
+            ts(0),
+        )
+        .expect("first to move");
+        let plies = [Ply::new(
+            eid(1),
+            pk(FIRST),
+            eid(SESSION),
+            1,
+            false,
+            "[\"a1\",\"a4\",null]".to_owned(),
+            ts(100),
+        )];
+        let no_atts: [Attestation; 0] = [];
+        let resignation = Conclusion::new(
+            eid(172),
+            pk(FIRST),
+            eid(SESSION),
+            verdict(Status::Resignation, Outcome3::SecondWins),
+            ts(400),
+        );
+        let on_time = Conclusion::new(
+            eid(170),
+            pk(FIRST),
+            eid(SESSION),
+            verdict(Status::Timeout, Outcome3::FirstWins),
+            ts(1000),
+        );
+        // A stray attestation must not move a self-timed cutoff.
+        let stray = [att(171, 172, 5000)];
+        for atts in [&no_atts[..], &stray[..]] {
+            let offered = [on_time, resignation];
+            let selected = select_conclusion(&p, &plies, atts, &offered)
+                .expect("consistent")
+                .expect("rules");
+            assert_eq!(selected.conclusion.id, eid(172));
+            assert_eq!(selected.cutoff, ts(400));
+            assert_eq!(selected.verdict.status(), Status::Resignation);
         }
     }
 
@@ -1026,14 +1512,105 @@ mod tests {
         let plies = [ply(1, FIRST, 1, "[\"a1\",\"a8\",null]")];
         let atts = [att(101, 1, 100), att(171, CONCLUSION, 1000)];
         let p = params("7k^/6pp/8/8/8/8/8/R3K^3 / W/w", 600, 0);
-        let adj = kernel_result(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
+        let adj = expected_verdict(&p, &plies, &atts, &conclusion(SECOND)).expect("result");
+        assert_eq!(adj.score(Side::First), 100);
+        assert_eq!(adj.score(Side::Second), 0);
+    }
+
+    #[test]
+    fn a_verdict_is_a_coherent_status_outcome_pair() {
+        // `Verdict::new` admits exactly the pairs the rule system can yield:
+        // a decisive status with a decisive outcome, a draw status with the
+        // draw (Statuses — Sanki, the result-kind column). Every other pair
+        // the wire could carry is refused, so no Conclusion claiming one can
+        // be built — and `check` never has to call such a claim "wrong".
+        use sashite_sanki_engine::domain::status::ResultKind;
+        for status in Status::ALL {
+            for outcome in [Outcome3::FirstWins, Outcome3::Draw, Outcome3::SecondWins] {
+                let coherent = match status.result_kind() {
+                    ResultKind::Draw => outcome == Outcome3::Draw,
+                    ResultKind::Decisive => outcome != Outcome3::Draw,
+                };
+                let built = Verdict::new(status, outcome);
+                assert_eq!(built.is_some(), coherent, "{status:?} / {outcome:?}");
+                if let Some(v) = built {
+                    assert_eq!(v.status(), status);
+                    assert_eq!(v.outcome(), outcome);
+                    let (first, second) = outcome.points();
+                    assert_eq!(
+                        (v.score(Side::First), v.score(Side::Second)),
+                        (first, second)
+                    );
+                }
+            }
+        }
+        // The three verdicts the post-chain resolution builds are coherent by
+        // construction — the same pairs `new` would admit.
         assert_eq!(
-            adj.score(sashite_sanki_engine::domain::side::Side::First),
-            100
+            Verdict::AGREEMENT,
+            verdict(Status::Agreement, Outcome3::Draw)
         );
         assert_eq!(
-            adj.score(sashite_sanki_engine::domain::side::Side::Second),
-            0
+            Verdict::timeout_against(Side::First),
+            verdict(Status::Timeout, Outcome3::SecondWins)
+        );
+        assert_eq!(
+            Verdict::resignation_by(Side::Second),
+            verdict(Status::Resignation, Outcome3::FirstWins)
+        );
+    }
+
+    #[test]
+    fn cutoff_of_reports_the_first_reason_that_holds() {
+        // The reasons are checked in a fixed order — other session, non-player,
+        // pending, before t₀ — so that the reason reported is the one that
+        // stays true whatever later happens to the Conclusion's timing: a
+        // stranger's unattested Conclusion is `NotAPlayer` (final), not
+        // `Pending` (transient), and a foreign one is `OtherSession` even when
+        // it is also unsigned by a player and untimed.
+        use super::cutoff_of;
+        let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 1000);
+        let at = |id: u8, signer: u8, session: u8| {
+            Conclusion::new(
+                eid(id),
+                pk(signer),
+                eid(session),
+                verdict(Status::Resignation, Outcome3::FirstWins),
+                ts(0),
+            )
+        };
+        let no_atts: [Attestation; 0] = [];
+        let early = [att(171, CONCLUSION, 500)];
+        let timed = [att(171, CONCLUSION, 1500)];
+
+        // Foreign session, stranger, untimed: the session is reported.
+        assert_eq!(
+            cutoff_of(&p, &no_atts, &at(CONCLUSION, 77, 51)),
+            Err(NoVerdict::OtherSession)
+        );
+        // This session, stranger, untimed — and timed before t₀: the signer.
+        assert_eq!(
+            cutoff_of(&p, &no_atts, &at(CONCLUSION, 77, SESSION)),
+            Err(NoVerdict::NotAPlayer)
+        );
+        assert_eq!(
+            cutoff_of(&p, &early, &at(CONCLUSION, 77, SESSION)),
+            Err(NoVerdict::NotAPlayer)
+        );
+        // A player, untimed: pending.
+        assert_eq!(
+            cutoff_of(&p, &no_atts, &at(CONCLUSION, SECOND, SESSION)),
+            Err(NoVerdict::Pending)
+        );
+        // A player, timed before t₀: before start.
+        assert_eq!(
+            cutoff_of(&p, &early, &at(CONCLUSION, SECOND, SESSION)),
+            Err(NoVerdict::BeforeStart)
+        );
+        // In reach: the signer's side and the canonical timing.
+        assert_eq!(
+            cutoff_of(&p, &timed, &at(CONCLUSION, SECOND, SESSION)),
+            Ok((Side::Second, ts(1500)))
         );
     }
 }

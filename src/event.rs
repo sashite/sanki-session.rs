@@ -11,31 +11,44 @@
 //! - [`Conclusion`] (kind `3425`) — a player's verdict on the session, binding
 //!   by correctness: its canonical timing is the **cutoff** at which the
 //!   session is evaluated, its signer the **invoker**, and the verdict it
-//!   *claims* is checked against the one the kernel yields
-//!   ([`crate::verdict::conforms`]).
+//!   *claims* is checked against the one the rule system yields
+//!   ([`crate::verdict::check`]).
 //!
 //! Timing depends on the session's mode. A suite event's own `created_at` is the
 //! signer's self-claim. When the session designates a timestamper (attested
 //! mode), that self-claim is superseded by the [`Attestation`]'s `created_at`
-//! and never drives race resolution (kind `3423` §Time accounting; kind `3425`
+//! and never drives timing (kind `3423` §Time accounting; kind `3425`
 //! §Attestation by the designated timestamper). When the session is self-timed
-//! — no timestamper, the default — there is no attestation, and the
-//! relay-enforced `created_at` IS the canonical timing (nostr-integration
-//! §Timing). [`Ply`] and [`Conclusion`] therefore carry `created_at`; it is
-//! consulted only in the self-timed branch of
-//! [`crate::race_resolution::canonical_timing`].
+//! — no timestamper, timing relays instead — there is no attestation, and the
+//! `created_at` **as accepted by a designated timing relay** IS the canonical
+//! timing (Canonical Timing §Timing modes and mode selection). [`Ply`] and
+//! [`Conclusion`] therefore carry `created_at`; it is consulted only in the
+//! self-timed branch of [`crate::timing::canonical_timing`].
+//!
+//! **Precondition (self-timed mode).** This crate cannot observe a relay's
+//! acceptance. The caller MUST offer it only Plies and Conclusions whose
+//! acceptance by one of the session's designated timing relays is established
+//! (fetched from such a relay, or seen accepted by one); an event without that
+//! is *pending* (Canonical Timing §The pending state) and is not a candidate
+//! for anything. Passing it would time it by a clock no party agreed to.
+//!
+//! **Precondition (identity).** Event ids are unique: a Nostr id is the hash
+//! of the event, so two distinct events never share one. The kernel relies on
+//! it — a slot's candidates are told apart by id, and the id is the race
+//! tiebreak — and does not re-verify it; a caller that has not checked the
+//! ids it parsed (NIP-01) must not expect a defined answer for two events
+//! offered under one id.
 //!
 //! Identity is carried by [`EventId`] and [`PublicKey`], 32-byte newtypes over
 //! the canonical Nostr encoding. [`EventId`] is ordered: the byte order is the
-//! "smallest event ID" tiebreak of race resolution.
+//! "smallest event ID" tiebreak of selection and meta-resolution.
 
-use sashite_sanki_engine::domain::outcome::Verdict;
-use sashite_sanki_engine::domain::status::{Outcome3, Status};
+use crate::verdict::Verdict;
 use sashite_sanki_engine::domain::time::Timestamp;
 
 /// A 32-byte Nostr event identifier.
 ///
-/// Ordered by raw bytes, which is the tiebreak used by race resolution
+/// Ordered by raw bytes, which is the tiebreak of selection and meta-resolution
 /// ("smallest event ID").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EventId([u8; 32]);
@@ -130,9 +143,9 @@ fn write_hex(f: &mut core::fmt::Formatter<'_>, bytes: &[u8; 32]) -> core::fmt::R
 /// A played half-move (kind `3423`).
 ///
 /// `content` is the opaque move encoding; its syntax and legality are the
-/// kernel's concern, not this model's. `created_at` is the event's relay-enforced
-/// timestamp — the canonical timing in self-timed mode, ignored in attested mode
-/// (see the module documentation).
+/// kernel's concern, not this model's. `created_at` is the event's own
+/// timestamp — the canonical timing in self-timed mode (on the module's
+/// acceptance precondition), ignored in attested mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ply {
     /// The Ply event's id (race-resolution tiebreak).
@@ -149,8 +162,10 @@ pub struct Ply {
     pub draw: bool,
     /// The played half-move, in the rule system's encoding.
     pub content: String,
-    /// The event's own (relay-enforced) `created_at`. The canonical timing when
-    /// the session is self-timed; ignored when a timestamper attests it.
+    /// The event's own `created_at`. The canonical timing when the session is
+    /// self-timed — on the module's precondition that its acceptance by a
+    /// designated timing relay is established; ignored when a timestamper
+    /// attests it.
     pub created_at: Timestamp,
 }
 
@@ -220,23 +235,26 @@ impl Attestation {
 /// The event fixes two things the kernel reads — **who** concludes (its signer,
 /// the invoker of the post-chain conventions: draw acceptance, residual
 /// resignation) and **when** (its canonical timing, the cutoff at which the
-/// natural state is evaluated) — and **claims** one thing the kernel checks: the
-/// termination status (the event's `content`) and the result distribution (its
-/// `result` tags). A Conclusion is conforming iff its claim equals the verdict
-/// the kernel yields at its cutoff (kind `3425` §Semantic constraints, item 8 —
-/// *binding by correctness*); see [`crate::verdict::conforms`].
+/// natural state is evaluated) — and **claims** one thing the kernel checks: a
+/// [`Verdict`], the termination status (the event's `content`) and the result
+/// distribution (its `result` tags). A Conclusion is conforming iff its claim
+/// equals the verdict the rule system yields at its cutoff (kind `3425`
+/// §Semantic constraints, item 8 — *binding by correctness*); see
+/// [`crate::verdict::check`].
 ///
-/// The application maps the `result` tags to an [`Outcome3`] — `100/0`, `50/50`
-/// or `0/100` in seat order — and the `content` to a [`Status`] before building
-/// the value; a Conclusion whose tags admit no such mapping (an unknown status
-/// token, an uncommon split) cannot be conforming under the `sanki` rule
-/// system and needs no kernel to be rejected.
+/// The application maps the `result` tags to an outcome
+/// ([`crate::session::SessionParams::outcome_from_scores`]) and the `content`
+/// to a status, then builds the claim with [`Verdict::new`]; a Conclusion whose
+/// tags admit no such mapping (an unknown status token, an uncommon split, a
+/// status and an outcome of different kinds) cannot be conforming under the
+/// `sanki` rule system and needs no kernel to be refused.
 ///
-/// The claim is inert for the *computation*: [`crate::verdict::kernel_result`]
-/// reads only the signer and the cutoff. A caller wanting to know what verdict a
-/// Conclusion published *now* would carry — a client before it signs one, a bot
-/// deciding whether to claim a win on time — builds a synthetic Conclusion timed
-/// "now" with any claim and reads the kernel's answer.
+/// The claim is inert for the *computation*: [`crate::verdict::expected_verdict`]
+/// reads only the signer and the cutoff, and [`crate::verdict::check`] compares
+/// the claim afterwards. A caller wanting to know what verdict it would carry
+/// by concluding *now* — a client before it signs, a bot deciding whether to
+/// claim a win on time — calls [`crate::verdict::verdict_at`] with its side and
+/// the present instant; no synthetic event is needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Conclusion {
     /// The Conclusion event's id (meta-resolution tiebreak).
@@ -245,12 +263,10 @@ pub struct Conclusion {
     pub signer: PublicKey,
     /// The referenced Game Session (kind `3422`).
     pub session: EventId,
-    /// The claimed termination status (the event's `content`).
-    pub status: Status,
-    /// The claimed result distribution (the event's `result` tags).
-    pub result: Outcome3,
-    /// The event's own (relay-enforced) `created_at` — the canonical cutoff
-    /// timing when the session is self-timed; ignored when attested.
+    /// The claimed verdict: the event's `content` and its `result` tags.
+    pub claim: Verdict,
+    /// The event's own `created_at` — the cutoff when the session is self-timed
+    /// (on the module's acceptance precondition); ignored when attested.
     pub created_at: Timestamp,
 }
 
@@ -262,27 +278,15 @@ impl Conclusion {
         id: EventId,
         signer: PublicKey,
         session: EventId,
-        status: Status,
-        result: Outcome3,
+        claim: Verdict,
         created_at: Timestamp,
     ) -> Self {
         Self {
             id,
             signer,
             session,
-            status,
-            result,
+            claim,
             created_at,
-        }
-    }
-
-    /// The verdict this Conclusion claims, as the kernel expresses one.
-    #[inline]
-    #[must_use]
-    pub const fn claim(&self) -> Verdict {
-        Verdict::Terminated {
-            status: self.status,
-            result: self.result,
         }
     }
 }
@@ -297,7 +301,7 @@ mod tests {
     )]
 
     use super::{Attestation, Conclusion, EventId, Ply, PublicKey};
-    use sashite_sanki_engine::domain::outcome::Verdict;
+    use crate::verdict::Verdict;
     use sashite_sanki_engine::domain::status::{Outcome3, Status};
     use sashite_sanki_engine::domain::time::Timestamp;
 
@@ -453,23 +457,19 @@ mod tests {
 
     #[test]
     fn conclusion_links_session_and_carries_its_claim() {
+        let claim = Verdict::new(Status::Checkmate, Outcome3::FirstWins).expect("coherent");
         let conclusion = Conclusion::new(
             EventId::from_bytes([1; 32]),
             PublicKey::from_bytes([2; 32]),
             EventId::from_bytes([4; 32]),
-            Status::Checkmate,
-            Outcome3::FirstWins,
+            claim,
             Timestamp::from_unix(2000),
         );
         assert_eq!(conclusion.session, EventId::from_bytes([4; 32]));
         assert_eq!(conclusion.signer, PublicKey::from_bytes([2; 32]));
         assert_eq!(conclusion.created_at, Timestamp::from_unix(2000));
-        assert_eq!(
-            conclusion.claim(),
-            Verdict::Terminated {
-                status: Status::Checkmate,
-                result: Outcome3::FirstWins,
-            }
-        );
+        assert_eq!(conclusion.claim, claim);
+        assert_eq!(conclusion.claim.status(), Status::Checkmate);
+        assert_eq!(conclusion.claim.outcome(), Outcome3::FirstWins);
     }
 }

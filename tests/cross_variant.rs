@@ -1,5 +1,5 @@
 //! Cross-variant evaluation: the nine pairings driven end to end through
-//! [`kernel_result`] (Statuses — Sanki §Verdict resolution).
+//! [`expected_verdict`] (Statuses — Sanki §Verdict resolution).
 //!
 //! Sanki is a **cross-variant** family: kind `3422` assigns each player a
 //! variant through the initial position's SIN styles, so chess, ōgi and xiongqi
@@ -35,7 +35,6 @@
     clippy::arithmetic_side_effects
 )]
 
-use sashite_sanki_engine::domain::outcome::Verdict;
 use sashite_sanki_engine::domain::side::Side;
 use sashite_sanki_engine::domain::status::{Outcome3, Status};
 use sashite_sanki_engine::domain::time::{Duration, Timestamp};
@@ -43,8 +42,8 @@ use sashite_sanki_engine::domain::time_control::{Period, TimeControl};
 use sashite_sanki_engine::position::Position;
 use sashite_sanki_session::event::{Attestation, Conclusion, EventId, Ply, PublicKey};
 use sashite_sanki_session::natural_state::{natural_state, ChainEnd, NaturalState};
-use sashite_sanki_session::session::SessionParams;
-use sashite_sanki_session::verdict::{conforms, kernel_result, KernelResult};
+use sashite_sanki_session::session::{Seats, SessionParams};
+use sashite_sanki_session::verdict::{check, expected_verdict, Check, Verdict};
 
 const FIRST: u8 = 10;
 const SECOND: u8 = 20;
@@ -98,12 +97,12 @@ impl Session {
         let params = SessionParams::new(
             eid(SESSION),
             Some(pk(TIMESTAMPER)),
-            pk(FIRST),
-            pk(SECOND),
+            Seats::new(pk(FIRST), pk(SECOND)).expect("distinct players"),
             TimeControl::new(period, Vec::new()),
             parsed,
             ts(0),
-        );
+        )
+        .expect("first to move");
 
         let mut plies = Vec::with_capacity(line.len());
         let mut attestations = Vec::with_capacity(line.len() + 1);
@@ -144,14 +143,13 @@ impl Session {
         }
     }
 
-    /// A Conclusion by `invoker` claiming `status`/`result`.
-    fn conclusion(&self, invoker: u8, status: Status, result: Outcome3) -> Conclusion {
+    /// A Conclusion by `invoker` claiming `status`/`outcome`.
+    fn conclusion(&self, invoker: u8, status: Status, outcome: Outcome3) -> Conclusion {
         Conclusion::new(
             eid(CONCLUSION),
             pk(invoker),
             eid(SESSION),
-            status,
-            result,
+            Verdict::new(status, outcome).expect("a coherent claim"),
             ts(0),
         )
     }
@@ -159,63 +157,89 @@ impl Session {
     /// A Conclusion by `invoker` whose claim is a placeholder (not read by the
     /// replay).
     fn probe(&self, invoker: u8) -> Conclusion {
-        self.conclusion(invoker, Status::Resignation, Outcome3::Draw)
+        self.conclusion(invoker, Status::Resignation, Outcome3::SecondWins)
     }
 
-    /// The natural-state replay (the chain builder and legality authority).
+    /// The natural-state replay (the chain builder and legality authority),
+    /// at a cutoff late enough to admit every published half-move.
     fn replay(&self) -> NaturalState<'_> {
         let natural = natural_state(
             &self.params,
             &self.plies,
             &self.attestations,
-            &self.probe(FIRST),
-        )
-        .expect("the Conclusion is canonically attested");
-        // The chain is computed against the Conclusion's canonical timing, and the
-        // cutoff here is late enough to admit every published half-move.
+            ts(self.cutoff),
+        );
         assert_eq!(natural.cutoff, ts(self.cutoff));
         natural
     }
 
-    /// The kernel result for a Conclusion by `invoker` — and, on the way, the
-    /// binding-by-correctness check: a Conclusion claiming exactly that result
-    /// conforms, one claiming the flipped outcome does not.
-    fn rule(&self, invoker: u8) -> KernelResult {
-        let result = kernel_result(
+    /// The verdict expected of a Conclusion by `invoker` — and, on the way,
+    /// the binding-by-correctness check: a Conclusion claiming exactly that
+    /// verdict conforms, one claiming another outcome of the same status (the
+    /// flipped winner, or the status's other kind — refused at construction)
+    /// does not.
+    fn rule(&self, invoker: u8) -> Verdict {
+        let verdict = expected_verdict(
             &self.params,
             &self.plies,
             &self.attestations,
             &self.probe(invoker),
         )
-        .expect("a canonically timed Conclusion by a player always has a result");
-        let right = self.conclusion(invoker, result.status(), result.result());
-        assert!(conforms(
-            &self.params,
-            &self.plies,
-            &self.attestations,
-            &right
-        ));
-        let flipped = match result.result() {
-            Outcome3::FirstWins => Outcome3::SecondWins,
-            Outcome3::SecondWins => Outcome3::FirstWins,
-            Outcome3::Draw => Outcome3::FirstWins,
-        };
-        let wrong = self.conclusion(invoker, result.status(), flipped);
-        assert!(!conforms(
-            &self.params,
-            &self.plies,
-            &self.attestations,
-            &wrong
-        ));
-        result
+        .expect("a canonically timed Conclusion by a player always has a verdict");
+        // Binding by correctness, round-tripped through a real Conclusion: the
+        // one claiming exactly this verdict is Conforming; the flipped one is
+        // Wrong and names this same verdict as `expected`.
+        let right = self.conclusion(invoker, verdict.status(), verdict.outcome());
+        assert_eq!(
+            check(&self.params, &self.plies, &self.attestations, &right),
+            Check::Conforming(verdict)
+        );
+        match verdict.outcome() {
+            Outcome3::FirstWins | Outcome3::SecondWins => {
+                let flipped = match verdict.outcome() {
+                    Outcome3::FirstWins => Outcome3::SecondWins,
+                    _ => Outcome3::FirstWins,
+                };
+                let wrong = self.conclusion(invoker, verdict.status(), flipped);
+                match check(&self.params, &self.plies, &self.attestations, &wrong) {
+                    Check::Wrong { claimed, expected } => {
+                        assert_eq!(claimed, wrong.claim);
+                        assert_eq!(expected, verdict);
+                    }
+                    other => panic!("expected a wrong claim, got {other:?}"),
+                }
+            }
+            Outcome3::Draw => {
+                // A draw status admits no other outcome: a decisive claim under
+                // it is not a wrong Conclusion, it is no verdict value at all.
+                assert!(Verdict::new(verdict.status(), Outcome3::FirstWins).is_none());
+                // The wrong claim is then another draw status, if the vocabulary
+                // has one.
+                let other = if verdict.status() == Status::Stalemate {
+                    Status::Agreement
+                } else {
+                    Status::Stalemate
+                };
+                let wrong = self.conclusion(invoker, other, Outcome3::Draw);
+                match check(&self.params, &self.plies, &self.attestations, &wrong) {
+                    Check::Wrong { claimed, expected } => {
+                        assert_eq!(claimed, wrong.claim);
+                        assert_eq!(expected, verdict);
+                    }
+                    other => panic!("expected a wrong claim, got {other:?}"),
+                }
+            }
+        }
+        verdict
     }
 }
 
 /// The replay's terminal status, or `None` for a still-ongoing end position.
 fn termination(natural: &NaturalState<'_>) -> Option<Status> {
     match &natural.end {
-        ChainEnd::Terminal(Verdict::Terminated { status, .. }, _) => Some(*status),
-        ChainEnd::Terminal(Verdict::Ongoing, _) | ChainEnd::Ongoing(_) => None,
+        ChainEnd::Terminal { verdict, .. } => Some(verdict.status()),
+        ChainEnd::Ongoing(_) => None,
+        ChainEnd::Inconsistent => panic!("inconsistent replay"),
     }
 }
 
@@ -223,9 +247,10 @@ fn termination(natural: &NaturalState<'_>) -> Option<Status> {
 fn ongoing_feen(natural: &NaturalState<'_>) -> String {
     match &natural.end {
         ChainEnd::Ongoing(state) => state.position().to_feen(),
-        ChainEnd::Terminal(verdict, _) => {
+        ChainEnd::Terminal { verdict, .. } => {
             panic!("expected an ongoing end position, got {verdict:?}")
         }
+        ChainEnd::Inconsistent => panic!("expected an ongoing end position, got an inconsistency"),
     }
 }
 
@@ -308,15 +333,17 @@ fn inert_tray_checkmate_binds_the_verdict() {
     assert_eq!(natural.next_half_move(), 6);
     assert_eq!(termination(&natural), Some(Status::Checkmate));
     match natural.end {
-        ChainEnd::Terminal(_, at) => assert_eq!(at, ts(5 * TICK)),
-        ChainEnd::Ongoing(_) => panic!("expected the mate to terminate the chain"),
+        ChainEnd::Terminal { at, .. } => assert_eq!(at, ts(5 * TICK)),
+        ChainEnd::Ongoing(_) | ChainEnd::Inconsistent => {
+            panic!("expected the mate to terminate the chain")
+        }
     }
 
     // The verdict is play-derived, so it does not depend on who invoked.
     for invoker in [FIRST, SECOND] {
         let result = session.rule(invoker);
         assert_eq!(result.status(), Status::Checkmate);
-        assert_eq!(result.result(), Outcome3::FirstWins);
+        assert_eq!(result.outcome(), Outcome3::FirstWins);
         assert_eq!(result.score(Side::First), 100);
         assert_eq!(result.score(Side::Second), 0);
     }
@@ -333,7 +360,7 @@ fn inert_tray_checkmate_from_the_standard_mixed_start() {
 
     let result = session.rule(FIRST);
     assert_eq!(result.status(), Status::Checkmate);
-    assert_eq!(result.result(), Outcome3::FirstWins);
+    assert_eq!(result.outcome(), Outcome3::FirstWins);
 }
 
 #[test]
@@ -474,7 +501,7 @@ fn every_pairing_is_evaluated_end_to_end() {
         );
         let ruled = session.rule(*invoker);
         assert_eq!(ruled.status(), *status, "{label}: status");
-        assert_eq!(ruled.result(), *result, "{label}: result");
+        assert_eq!(ruled.outcome(), *result, "{label}: result");
     }
 }
 
@@ -556,8 +583,8 @@ fn cross_variant_capture_feeds_the_ogi_hand_and_the_drop_is_played() {
     // Still ongoing at the cutoff, both clocks healthy: the invocation resolves
     // as the residual resignation, against whoever invoked.
     assert_eq!(session.rule(SECOND).status(), Status::Resignation);
-    assert_eq!(session.rule(SECOND).result(), Outcome3::FirstWins);
-    assert_eq!(session.rule(FIRST).result(), Outcome3::SecondWins);
+    assert_eq!(session.rule(SECOND).outcome(), Outcome3::FirstWins);
+    assert_eq!(session.rule(FIRST).outcome(), Outcome3::SecondWins);
 }
 
 #[test]
@@ -579,7 +606,7 @@ fn cross_variant_uchifuzume_is_skipped_never_a_loss() {
     // resolves, as a residual resignation against second.
     let result = session.rule(SECOND);
     assert_eq!(result.status(), Status::Resignation);
-    assert_eq!(result.result(), Outcome3::FirstWins);
+    assert_eq!(result.outcome(), Outcome3::FirstWins);
 }
 
 /// Seven half-moves from the published xiongqi/chess start: the Soldier walks

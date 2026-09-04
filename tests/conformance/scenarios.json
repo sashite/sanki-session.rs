@@ -1,5 +1,5 @@
 {
-	"version": 8,
+	"version": 9,
 	"category": "scenario",
 	"vectors": [
 		{
@@ -100,7 +100,7 @@
 		},
 		{
 			"id": "scenario.identical-content-retries-collapse",
-			"note": "second's premove Ke8-e7 was published @50 (id aa) and relay-retried with IDENTICAL content @60 (id bb): the copies collapse to the race-canonical representative — smallest (timing, id) — BEFORE the anterior window, so the chain selects aa and anchors the clock at 50, never the retry",
+			"note": "second's premove Ke8-e7 was published @50 (id aa) and RE-SIGNED with identical content @60 (id bb): identical candidates are one candidate for the cap, represented in the anterior window by the one the newest-first scan reaches first — bb @60 — exactly what the selection would pick with no collapse at all. The collapse never changes the selected move; a premove charges no clock and moves no anchor, so which twin represents the pair has no other effect (Move Encoding — Sanki §Slot candidates and selection)",
 			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
 			"t0": 0,
 			"cutoff": 1000,
@@ -127,7 +127,7 @@
 					"timedAt": 60
 				}
 			],
-			"expectedChain": ["m1", "aa"],
+			"expectedChain": ["m1", "bb"],
 			"expectedTermination": null
 		},
 		{
@@ -408,7 +408,7 @@
 		},
 		{
 			"id": "scenario.abandonment-unfilled",
-			"note": "first plays; the opponent never fills their slot, so the chain stops at one half-move (the slot stays unfilled and the on-move player's clock runs — adjudication resolves it)",
+			"note": "first plays; the opponent never fills their slot, so the chain stops at one half-move (the slot stays unfilled and the on-move player's clock runs — the post-chain resolution decides it at the cutoff)",
 			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
 			"t0": 0,
 			"cutoff": 1000,
@@ -8860,7 +8860,7 @@
 		},
 		{
 			"id": "scenario.race-equal-timing-informed-smallest-id",
-			"note": "same signer, same slot, SAME canonical timing, DIFFERENT moves (the double-publish family): d1 (e8-d8) and d2 (e8-e7) are both legal and both timed at 20 — informed window, so the tie breaks to the SMALLEST id, d1, deterministically. Both implementations must pick the same event or the arbiter finalises one game while the client displays another",
+			"note": "same signer, same slot, SAME canonical timing, DIFFERENT moves (the double-publish family): d1 (e8-d8) and d2 (e8-e7) are both legal and both timed at 20 — informed window, so the tie breaks to the SMALLEST id, d1, deterministically. Both implementations must pick the same event or one consumer finalises a game another displays differently",
 			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
 			"t0": 0,
 			"cutoff": 1000,
@@ -9405,6 +9405,620 @@
 				}
 			],
 			"expectedChain": ["m1", "m2", "m3", "m4", "m5", "m6", "m7"],
+			"expectedTermination": null
+		},
+		{
+			"id": "scenario.re-premove-back-to-an-earlier-content-supersedes",
+			"note": "second premoves Ke8-e7 @50, changes their mind to Ke8-d8 @60, and changes it back to Ke8-e7 @70, all anterior to first's move @200: the most recent intent is Ke8-e7 @70. A collapse keyed on content that kept the EARLIEST twin (@50) would hand the slot to Ke8-d8 @60; the collapse must be invisible to the selection, so the latest legal premove, p3, wins",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 200
+				},
+				{
+					"id": "p1",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e7", null],
+					"timedAt": 50
+				},
+				{
+					"id": "p2",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "d8", null],
+					"timedAt": 60
+				},
+				{
+					"id": "p3",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e7", null],
+					"timedAt": 70
+				}
+			],
+			"expectedChain": ["m1", "p3"],
+			"expectedTermination": null
+		},
+		{
+			"id": "scenario.draw-flag-distinguishes-identical-contents",
+			"note": "second premoves Ke8-e7 @100 without an offer and re-premoves the SAME move WITH the draw flag @200, both anterior to first's move @500: the offer is part of what a Ply says, so the two are distinct candidates and the latest legal premove — the offer — takes the slot. first, the offeree, then concludes: agreement (Statuses — Sanki §Implicit draw by agreement)",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 500
+				},
+				{
+					"id": "p1",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e7", null],
+					"timedAt": 100
+				},
+				{
+					"id": "p2",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e7", null],
+					"timedAt": 200,
+					"draw": true
+				}
+			],
+			"expectedChain": ["m1", "p2"],
+			"expectedTermination": null,
+			"invoker": "first",
+			"expectedVerdict": {
+				"status": "agreement",
+				"result": {
+					"first": 50,
+					"second": 50
+				}
+			}
+		},
+		{
+			"id": "scenario.identical-pair-straddling-the-boundary-is-two-candidates",
+			"note": "the same content published once anterior (@50) and once informed (@250, after first's move @200) is two candidates, one per window — the collapse is per window. The anterior one is legal and wins (premoves first); had it been illegal, the informed twin would still take the slot",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 200
+				},
+				{
+					"id": "p1",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e7", null],
+					"timedAt": 50
+				},
+				{
+					"id": "p2",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e7", null],
+					"timedAt": 250
+				}
+			],
+			"expectedChain": ["m1", "p1"],
+			"expectedTermination": null
+		},
+		{
+			"id": "scenario.agreement-when-the-offeree-concludes",
+			"note": "first's only ply carries the draw flag (an offer); second, the offeree, concludes while it is the chain's tail: acceptance — agreement, 50/50 (Statuses — Sanki §Verdict resolution, post-chain step 1)",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 100,
+					"draw": true
+				}
+			],
+			"expectedChain": ["m1"],
+			"expectedTermination": null,
+			"invoker": "second",
+			"expectedVerdict": {
+				"status": "agreement",
+				"result": {
+					"first": 50,
+					"second": 50
+				}
+			}
+		},
+		{
+			"id": "scenario.offerer-cannot-accept-their-own-offer",
+			"note": "the same standing offer, but the OFFERER concludes: an offer is accepted by the opponent only, so the invocation has no cause and is first's residual resignation (Statuses — Sanki §Implicit draw by agreement)",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 100,
+					"draw": true
+				}
+			],
+			"expectedChain": ["m1"],
+			"expectedTermination": null,
+			"invoker": "first",
+			"expectedVerdict": {
+				"status": "resignation",
+				"result": {
+					"first": 0,
+					"second": 100
+				}
+			}
+		},
+		{
+			"id": "scenario.agreement-outranks-abandonment-timeout",
+			"note": "first offers a draw @100 and second, on move, lets their 600-second clock run to the cutoff @1000 (900 elapsed — expired) before concluding: the post-chain order is agreement → timeout → resignation, so the acceptance rules even though second's own clock has expired",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"timeControl": [[600, null, null]],
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 100,
+					"draw": true
+				}
+			],
+			"expectedChain": ["m1"],
+			"expectedTermination": null,
+			"invoker": "second",
+			"expectedVerdict": {
+				"status": "agreement",
+				"result": {
+					"first": 50,
+					"second": 50
+				}
+			}
+		},
+		{
+			"id": "scenario.abandonment-timeout-against-the-player-on-move",
+			"note": "first moves @100; second, on move with a 600-second bank, never replies; first concludes @1000 (900 elapsed from the chain's last anchor): abandonment timeout against second, the player on move — a win on time for the invoker",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"timeControl": [[600, null, null]],
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 100
+				}
+			],
+			"expectedChain": ["m1"],
+			"expectedTermination": null,
+			"invoker": "first",
+			"expectedVerdict": {
+				"status": "timeout",
+				"result": {
+					"first": 100,
+					"second": 0
+				}
+			}
+		},
+		{
+			"id": "scenario.abandonment-timeout-whoever-concludes",
+			"note": "the same expired clock, but SECOND — the player who abandoned — concludes: the abandonment timeout outranks the residual resignation, so the verdict is still a timeout against second, not a resignation (which would have the same loser, but the wrong cause)",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"timeControl": [[600, null, null]],
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 100
+				}
+			],
+			"expectedChain": ["m1"],
+			"expectedTermination": null,
+			"invoker": "second",
+			"expectedVerdict": {
+				"status": "timeout",
+				"result": {
+					"first": 100,
+					"second": 0
+				}
+			}
+		},
+		{
+			"id": "scenario.residual-resignation-by-the-invoker",
+			"note": "first moves @100; second concludes @400, within their 600-second budget, with no offer standing and no termination on the board: an invocation with no cause is the invoker's own resignation — concluding is at the signer's risk (kind 3425 §Implications)",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 400,
+			"timeControl": [[600, null, null]],
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 100
+				}
+			],
+			"expectedChain": ["m1"],
+			"expectedTermination": null,
+			"invoker": "second",
+			"expectedVerdict": {
+				"status": "resignation",
+				"result": {
+					"first": 100,
+					"second": 0
+				}
+			}
+		},
+		{
+			"id": "scenario.residual-resignation-off-turn",
+			"note": "the same position, but FIRST — not on move — concludes @400: resignation is turn-independent, decisive against the invoker",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 400,
+			"timeControl": [[600, null, null]],
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 100
+				}
+			],
+			"expectedChain": ["m1"],
+			"expectedTermination": null,
+			"invoker": "first",
+			"expectedVerdict": {
+				"status": "resignation",
+				"result": {
+					"first": 0,
+					"second": 100
+				}
+			}
+		},
+		{
+			"id": "scenario.abandonment-anchored-on-the-last-anchor-not-a-tail-premove",
+			"note": "first moves @100 (500 s left of 600); second's reply is a PREMOVE timed @50 — anterior, selected and applied — so first is on move again. The chain's last anchor is 100 (the boundary never rewinds to the premove's timing): at a cutoff of 600 first has spent exactly their budget (elapsed 500 is not > 500) and the invocation is second's residual resignation. Charged from the premove's own timing the flag would already have fallen at 551",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 600,
+			"timeControl": [[600, null, null]],
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 100
+				},
+				{
+					"id": "p2",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e7", null],
+					"timedAt": 50
+				}
+			],
+			"expectedChain": ["m1", "p2"],
+			"expectedTermination": null,
+			"invoker": "second",
+			"expectedVerdict": {
+				"status": "resignation",
+				"result": {
+					"first": 100,
+					"second": 0
+				}
+			}
+		},
+		{
+			"id": "scenario.abandonment-flags-one-second-past-the-last-anchor-budget",
+			"note": "the same session one second later: at a cutoff of 601 first's clock, charged from the last anchor 100, has expired (501 > 500) — abandonment timeout against first, whoever concludes",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 601,
+			"timeControl": [[600, null, null]],
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 100
+				},
+				{
+					"id": "p2",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e7", null],
+					"timedAt": 50
+				}
+			],
+			"expectedChain": ["m1", "p2"],
+			"expectedTermination": null,
+			"invoker": "second",
+			"expectedVerdict": {
+				"status": "timeout",
+				"result": {
+					"first": 0,
+					"second": 100
+				}
+			}
+		},
+		{
+			"id": "scenario.played-ply-timeout-outranks-the-mate-it-delivers",
+			"note": "Ra1-a8 mates the walled-in king — but the mover's 600-second budget was already spent when the Ply was timed (@700): the played-Ply timeout is the termination, against the mover, and the mate on the board changes nothing (Time Accounting — Sanki §The two timeout flavours)",
+			"position": "7k^/6pp/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"timeControl": [[600, null, null]],
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a8", null],
+					"timedAt": 700
+				}
+			],
+			"expectedChain": ["m1"],
+			"expectedTermination": {
+				"status": "timeout"
+			},
+			"invoker": "second",
+			"expectedVerdict": {
+				"status": "timeout",
+				"result": {
+					"first": 0,
+					"second": 100
+				}
+			}
+		},
+		{
+			"id": "scenario.terminal-outranks-a-standing-offer",
+			"note": "the mating Ply itself carries the draw flag: the replay's terminal result is the verdict, and the post-chain resolution — which would have read the flag as a standing offer accepted by the offeree — never runs",
+			"position": "7k^/6pp/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a8", null],
+					"timedAt": 100,
+					"draw": true
+				}
+			],
+			"expectedChain": ["m1"],
+			"expectedTermination": {
+				"status": "checkmate"
+			},
+			"invoker": "second",
+			"expectedVerdict": {
+				"status": "checkmate",
+				"result": {
+					"first": 100,
+					"second": 0
+				}
+			}
+		},
+		{
+			"id": "scenario.ply-timed-at-t0-is-a-candidate",
+			"note": "t0 = 1000: a ply canonically timed exactly AT t0 is valid — the candidate window is [t0, cutoff], closed at both ends (kind 3423 §Time accounting rules out timings strictly before t0) — and, the first slot's boundary being t0, informed. Pinned because a `>` where `>=` belongs would silently drop the opening move of every session whose first ply lands on the start second",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 1000,
+			"cutoff": 2000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 1000
+				},
+				{
+					"id": "m2",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e7", null],
+					"timedAt": 1100
+				}
+			],
+			"expectedChain": ["m1", "m2"],
+			"expectedTermination": null
+		},
+		{
+			"id": "scenario.identical-twins-at-the-boundary-are-informed",
+			"note": "first plays @100 — the boundary T of second's slot. second's two IDENTICAL replies t2 and t3 are both timed exactly AT 100: at or after T is informed, so the pair is one informed candidate represented by the earliest — the smallest id, t2 — exactly what the informed scan reaches first. A collapse that classified `<= T` as anterior would keep the LARGEST id, t3, and diverge from the selection rule (and from the other implementation) on which event is canonical",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 100
+				},
+				{
+					"id": "t2",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e7", null],
+					"timedAt": 100
+				},
+				{
+					"id": "t3",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e7", null],
+					"timedAt": 100
+				}
+			],
+			"expectedChain": ["m1", "t2"],
+			"expectedTermination": null
+		},
+		{
+			"id": "scenario.candidate-cap-is-the-sessions",
+			"note": "candidateCap = 1: the session's rule-system document carries K = 1, not the reference document's 8. second premoved a legal Ke8-e7 @50 and then an illegal Ke8-e5 @60, both anterior to first's move @100; the anterior window admits the K newest premoves — the illegal @60 alone — so the slot stays unfilled. Under K = 8 the scan would skip it and reach the legal @50 (chain m1, p1). Pinned so that neither implementation evaluates a session under a cap other than its own",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"candidateCap": 1,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 100
+				},
+				{
+					"id": "p1",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e7", null],
+					"timedAt": 50
+				},
+				{
+					"id": "p2",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e5", null],
+					"timedAt": 60
+				}
+			],
+			"expectedChain": ["m1"],
+			"expectedTermination": null
+		},
+		{
+			"id": "scenario.draw-flag-toggle-counts-twice-against-the-cap",
+			"note": "candidateCap = 3. second's anterior premoves, newest first: y @130 (Ke8-e5, illegal), x+draw @120 (Ke8-e6, illegal), x @110 (Ke8-e6, illegal), z @100 (Ke8-e7, legal). Identity is the content AND the draw flag, so x and x+draw are two candidates: the window of three is {y, x+draw, x}, all illegal, and the slot stays unfilled — z is never reached. Were the flag not part of the identity, x and x+draw would collapse to one candidate and the window {y, x+draw, z} would select z. The flag's part in the identity is observable only through the cap (each window keeps the candidate its scan reaches first, so it never changes WHICH candidate is selected)",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"candidateCap": 3,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 500
+				},
+				{
+					"id": "z",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e7", null],
+					"timedAt": 100
+				},
+				{
+					"id": "x",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e6", null],
+					"timedAt": 110
+				},
+				{
+					"id": "xd",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e6", null],
+					"timedAt": 120,
+					"draw": true
+				},
+				{
+					"id": "y",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e5", null],
+					"timedAt": 130
+				}
+			],
+			"expectedChain": ["m1"],
+			"expectedTermination": null
+		},
+		{
+			"id": "scenario.draw-flag-toggle-reached-past-the-cap",
+			"note": "the same five plies as `draw-flag-toggle-counts-twice-against-the-cap` under candidateCap = 4: the window {y, x+draw, x, z} now reaches the legal z, which fills the slot — proof that the cap, not legality, excluded it under K = 3",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"candidateCap": 4,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 500
+				},
+				{
+					"id": "z",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e7", null],
+					"timedAt": 100
+				},
+				{
+					"id": "x",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e6", null],
+					"timedAt": 110
+				},
+				{
+					"id": "xd",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e6", null],
+					"timedAt": 120,
+					"draw": true
+				},
+				{
+					"id": "y",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e5", null],
+					"timedAt": 130
+				}
+			],
+			"expectedChain": ["m1", "z"],
 			"expectedTermination": null
 		}
 	]

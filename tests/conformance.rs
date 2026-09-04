@@ -8,18 +8,26 @@
 //!   its legality probe, so the file pins only the *selection algorithm*: the
 //!   two windows (anterior latest-legal / informed earliest-legal) split at the
 //!   `boundary`, and the per-window cap `K`.
-//! - `scenarios.json` — full sessions, driven through [`natural_state`]: a founding
-//!   position, plies with their canonical-attestation timings, and a cutoff. The
-//!   asserted **selected chain** is the consensus property — the TypeScript client
-//!   replays the same `scenarios.json` through `forgivingPlyChain` and must select
-//!   the same chain, so the kernel cannot finalise a chain the client would not.
-//!   Since v4 (ADR-0010) each vector also pins the **termination**: the replay must
-//!   conclude `Terminal` with the expected status on the chain's last ply (the
-//!   background draws — insufficiency, repetition, the move limit — truncate it),
-//!   or still be `Ongoing` when `expectedTermination` is null.
+//! - `scenarios.json` — full sessions, driven through [`natural_state`] and
+//!   [`verdict_at`]: a founding position, plies with their canonical timings
+//!   (and, since v9, their `draw` flags), and a cutoff. The asserted **selected
+//!   chain** is the consensus property — the TypeScript client replays the same
+//!   `scenarios.json` and must select the same chain, so the kernel cannot
+//!   finalise a chain the client would not. Since v4 (ADR-0010) each vector also
+//!   pins the **termination**: the replay must end `Terminal` with the expected
+//!   status on the chain's last ply (the background draws — insufficiency,
+//!   repetition, the move limit — truncate it), or still be `Ongoing` when
+//!   `expectedTermination` is null. Since v9 a vector may also carry an
+//!   `invoker` and an `expectedVerdict` (`{ status, result: { first, second } }`):
+//!   the **post-chain resolution** — draw acceptance, abandonment timeout,
+//!   residual resignation, in that order — is then pinned too, so the two
+//!   implementations cannot drift on the verdict either; and a `candidateCap`
+//!   (the session's `K`, the reference document's 8 when absent), so the cap
+//!   is exercised as the session parameter it is.
 //!
-//! The TypeScript client runs both files, so the two implementations cannot drift on
-//! which Ply is canonical.
+//! The TypeScript client runs both files. Both corpora are vendored with the
+//! crate (`cargo package` ships them), so a missing file is a failure, not a
+//! skipped test.
 
 #![allow(
     clippy::unwrap_used,
@@ -29,17 +37,18 @@
     clippy::arithmetic_side_effects
 )]
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
-use sashite_sanki_engine::domain::outcome::Verdict;
-use sashite_sanki_engine::domain::status::{Outcome3, Status};
+use sashite_sanki_engine::domain::side::Side;
 use sashite_sanki_engine::domain::time::{Duration, Timestamp};
 use sashite_sanki_engine::domain::time_control::{Period, TimeControl};
 use sashite_sanki_engine::position::Position;
-use sashite_sanki_session::event::{Attestation, Conclusion, EventId, Ply, PublicKey};
+use sashite_sanki_session::event::{Attestation, EventId, Ply, PublicKey};
 use sashite_sanki_session::natural_state::{natural_state, ChainEnd};
-use sashite_sanki_session::selection::{select_candidate, Candidate, Selection};
-use sashite_sanki_session::session::SessionParams;
+use sashite_sanki_session::selection::{select_candidate, Candidate, Selection, CANDIDATE_CAP};
+use sashite_sanki_session::session::{Seats, SessionParams};
+use sashite_sanki_session::verdict::verdict_at;
 
 #[derive(serde::Deserialize)]
 struct Corpus {
@@ -50,7 +59,7 @@ struct Corpus {
 struct SelectionVector {
     id: String,
     boundary: i64,
-    cap: usize,
+    cap: NonZeroUsize,
     candidates: Vec<CandidateVector>,
     expected: Expected,
 }
@@ -69,9 +78,13 @@ struct Expected {
     selected: Option<String>,
 }
 
-/// The vendored selection corpus.
-fn corpus_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/conformance/selection.json")
+/// Reads a vendored corpus file, or fails: the corpora ship with the crate.
+fn read_corpus(name: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/conformance")
+        .join(name);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("conformance corpus {} unreadable: {error}", path.display()))
 }
 
 /// The `(result, selected)` pair a [`Selection`] maps to, in the corpus' encoding.
@@ -84,16 +97,8 @@ fn outcome(selection: &Selection<'_, String>) -> (&'static str, Option<String>) 
 
 #[test]
 fn selection_conformance() {
-    let path = corpus_path();
-    let Ok(contents) = std::fs::read_to_string(&path) else {
-        eprintln!(
-            "conformance corpus absent ({}) — test skipped.",
-            path.display()
-        );
-        return;
-    };
-    let corpus: Corpus =
-        serde_json::from_str(&contents).expect("conformance/selection.json: invalid JSON");
+    let corpus: Corpus = serde_json::from_str(&read_corpus("selection.json"))
+        .expect("conformance/selection.json: invalid JSON");
     assert!(!corpus.vectors.is_empty(), "the corpus has no vectors");
 
     for vector in &corpus.vectors {
@@ -153,11 +158,35 @@ struct ScenarioVector {
     /// null / absent for a still-ongoing end position.
     #[serde(rename = "expectedTermination", default)]
     expected_termination: Option<ScenarioTermination>,
+    /// The concluding side (v9): `first` or `second`. Present iff
+    /// `expectedVerdict` is.
+    #[serde(default)]
+    invoker: Option<String>,
+    /// The verdict the kernel yields at the cutoff for `invoker` (v9): the
+    /// status and the two players' scores.
+    #[serde(rename = "expectedVerdict", default)]
+    expected_verdict: Option<ScenarioVerdict>,
+    /// The session's slot selection cap `K` (v9). Absent -> the reference
+    /// document's value.
+    #[serde(rename = "candidateCap", default)]
+    candidate_cap: Option<NonZeroUsize>,
 }
 
 #[derive(serde::Deserialize)]
 struct ScenarioTermination {
     status: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ScenarioVerdict {
+    status: String,
+    result: ScenarioScores,
+}
+
+#[derive(serde::Deserialize)]
+struct ScenarioScores {
+    first: u8,
+    second: u8,
 }
 
 /// A v5 `timeControl` period: `[duration, increment, plies]` (kind-3420 order).
@@ -172,6 +201,9 @@ struct ScenarioPly {
     mv: serde_json::Value,
     #[serde(rename = "timedAt")]
     timed_at: i64,
+    /// The `draw` flag (v9): a standing offer when the Ply is the chain's tail.
+    #[serde(default)]
+    draw: bool,
 }
 
 const FIRST: u8 = 10;
@@ -183,9 +215,11 @@ fn pk(byte: u8) -> PublicKey {
 }
 
 /// Pack a short ASCII id into a 32-byte EventId (zero-padded). Injective for the
-/// distinct ASCII ids the corpus uses, and reversible by [`str_from_eid`] — the
-/// scenarios avoid `created_at` ties, so the resulting byte order never affects
-/// selection (which would otherwise need to match the TS lexicographic tiebreak).
+/// distinct ASCII ids the corpus uses, and reversible by [`str_from_eid`]. The
+/// byte order of the packed ids is the lexicographic order of the ASCII ids,
+/// which is the order the TypeScript client compares hex ids in — so the
+/// race-tiebreak vectors (`race-equal-timing-*`, same canonical timing,
+/// distinct ids) select the same event in both implementations.
 fn eid_from_str(s: &str) -> EventId {
     let mut bytes = [0_u8; 32];
     for (i, b) in s.bytes().take(32).enumerate() {
@@ -226,31 +260,24 @@ fn scenario_time_control(spec: &Option<Vec<PeriodTriple>>) -> TimeControl {
 
 #[test]
 fn scenario_conformance() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/conformance/scenarios.json");
-    let Ok(contents) = std::fs::read_to_string(&path) else {
-        eprintln!(
-            "conformance corpus absent ({}) — test skipped.",
-            path.display()
-        );
-        return;
-    };
-    let corpus: ScenarioCorpus =
-        serde_json::from_str(&contents).expect("conformance/scenarios.json: invalid JSON");
+    let corpus: ScenarioCorpus = serde_json::from_str(&read_corpus("scenarios.json"))
+        .expect("conformance/scenarios.json: invalid JSON");
     assert!(!corpus.vectors.is_empty(), "the corpus has no vectors");
 
     let session = eid_from_str("session");
-    let conclusion_id = eid_from_str("conclusion");
+    let seats = Seats::new(pk(FIRST), pk(SECOND)).expect("distinct players");
 
     for scenario in &corpus.vectors {
         let params = SessionParams::new(
             session,
             Some(pk(TIMESTAMPER)),
-            pk(FIRST),
-            pk(SECOND),
+            seats,
             scenario_time_control(&scenario.time_control),
             Position::parse(&scenario.position).expect("valid FEEN"),
             Timestamp::from_unix(scenario.t0),
-        );
+        )
+        .expect("first to move")
+        .with_candidate_cap(scenario.candidate_cap.unwrap_or(CANDIDATE_CAP));
 
         let plies: Vec<Ply> = scenario
             .plies
@@ -263,7 +290,7 @@ fn scenario_conformance() {
                     pk(signer),
                     session,
                     ply.step,
-                    false,
+                    ply.draw,
                     content,
                     // Attested here, so the ply's own created_at is ignored; seed it with
                     // the attested time for consistency.
@@ -272,7 +299,7 @@ fn scenario_conformance() {
             })
             .collect();
 
-        let mut attestations: Vec<Attestation> = scenario
+        let attestations: Vec<Attestation> = scenario
             .plies
             .iter()
             .map(|ply| {
@@ -284,26 +311,16 @@ fn scenario_conformance() {
                 )
             })
             .collect();
-        // The Conclusion's canonical attestation sets the cutoff the chain is
-        // computed against; its claim is not read by the replay.
-        attestations.push(Attestation::new(
-            eid_from_str("att-conclusion"),
-            pk(TIMESTAMPER),
-            conclusion_id,
-            Timestamp::from_unix(scenario.cutoff),
-        ));
 
-        let conclusion = Conclusion::new(
-            conclusion_id,
-            pk(FIRST),
-            session,
-            Status::Resignation,
-            Outcome3::SecondWins,
+        // The cutoff the chain is computed against; the chain and its
+        // termination are pinned by every vector, the post-chain verdict by
+        // those carrying an `invoker`.
+        let natural = natural_state(
+            &params,
+            &plies,
+            &attestations,
             Timestamp::from_unix(scenario.cutoff),
         );
-
-        let natural = natural_state(&params, &plies, &attestations, &conclusion)
-            .expect("attested conclusion");
         let chain: Vec<String> = natural
             .chain
             .iter()
@@ -319,8 +336,9 @@ fn scenario_conformance() {
         // The replay's conclusion must match the pinned termination: a terminal
         // verdict with the expected status, or a still-ongoing end position.
         let actual_termination = match &natural.end {
-            ChainEnd::Terminal(Verdict::Terminated { status, .. }, _) => Some(status.to_string()),
-            ChainEnd::Terminal(Verdict::Ongoing, _) | ChainEnd::Ongoing(_) => None,
+            ChainEnd::Terminal { verdict, .. } => Some(verdict.status().to_string()),
+            ChainEnd::Ongoing(_) => None,
+            ChainEnd::Inconsistent => panic!("scenario {}: inconsistent replay", scenario.id),
         };
         let expected_termination = scenario
             .expected_termination
@@ -331,5 +349,41 @@ fn scenario_conformance() {
             "scenario {}: termination mismatch",
             scenario.id
         );
+
+        // v9: the post-chain resolution, pinned by an invoker and a verdict.
+        match (&scenario.invoker, &scenario.expected_verdict) {
+            (None, None) => {}
+            (Some(invoker), Some(expected)) => {
+                let side = match invoker.as_str() {
+                    "first" => Side::First,
+                    "second" => Side::Second,
+                    other => panic!("scenario {}: unknown invoker {other:?}", scenario.id),
+                };
+                let result = verdict_at(
+                    &params,
+                    &plies,
+                    &attestations,
+                    side,
+                    Timestamp::from_unix(scenario.cutoff),
+                )
+                .unwrap_or_else(|_| panic!("scenario {}: inconsistent replay", scenario.id));
+                assert_eq!(
+                    result.status().to_string(),
+                    expected.status,
+                    "scenario {}: verdict status mismatch",
+                    scenario.id
+                );
+                assert_eq!(
+                    (result.score(Side::First), result.score(Side::Second)),
+                    (expected.result.first, expected.result.second),
+                    "scenario {}: verdict scores mismatch",
+                    scenario.id
+                );
+            }
+            _ => panic!(
+                "scenario {}: `invoker` and `expectedVerdict` come together",
+                scenario.id
+            ),
+        }
     }
 }
