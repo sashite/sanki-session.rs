@@ -1,5 +1,5 @@
-//! Cross-variant adjudication: the nine pairings driven end to end through
-//! [`adjudicate`] (Statuses — Sanki §Verdict resolution).
+//! Cross-variant evaluation: the nine pairings driven end to end through
+//! [`kernel_result`] (Statuses — Sanki §Verdict resolution).
 //!
 //! Sanki is a **cross-variant** family: kind `3422` assigns each player a
 //! variant through the initial position's SIN styles, so chess, ōgi and xiongqi
@@ -24,7 +24,7 @@
 //!
 //! [`inert_tray_checkmate_binds_the_verdict`] is a **pinned regression** for the
 //! `sashite-sanki-engine` 0.8.0 fix: below engine 0.8 the same session was
-//! adjudicated a `resignation` **against the player who had just delivered
+//! evaluated as a `resignation` **against the player who had just delivered
 //! checkmate**. See that test for the recorded before/after.
 
 #![allow(
@@ -35,23 +35,22 @@
     clippy::arithmetic_side_effects
 )]
 
-use sashite_sanki_arbiter::event::{AdjudicationRequest, Attestation, EventId, Ply, PublicKey};
-use sashite_sanki_arbiter::natural_state::{natural_state, Conclusion, NaturalState};
-use sashite_sanki_arbiter::session::SessionParams;
-use sashite_sanki_arbiter::verdict::{adjudicate, Adjudication};
 use sashite_sanki_engine::domain::outcome::Verdict;
 use sashite_sanki_engine::domain::side::Side;
 use sashite_sanki_engine::domain::status::{Outcome3, Status};
 use sashite_sanki_engine::domain::time::{Duration, Timestamp};
 use sashite_sanki_engine::domain::time_control::{Period, TimeControl};
 use sashite_sanki_engine::position::Position;
+use sashite_sanki_session::event::{Attestation, Conclusion, EventId, Ply, PublicKey};
+use sashite_sanki_session::natural_state::{natural_state, ChainEnd, NaturalState};
+use sashite_sanki_session::session::SessionParams;
+use sashite_sanki_session::verdict::{conforms, kernel_result, KernelResult};
 
 const FIRST: u8 = 10;
 const SECOND: u8 = 20;
 const TIMESTAMPER: u8 = 99;
-const ARBITER: u8 = 2;
 const SESSION: u8 = 50;
-const REQUEST: u8 = 170;
+const CONCLUSION: u8 = 170;
 
 /// The canonical spacing between successive half-moves. Every half-move is
 /// informed (each is timed at or after its slot's boundary, the predecessor's
@@ -74,7 +73,7 @@ fn ts(secs: i64) -> Timestamp {
     Timestamp::from_unix(secs)
 }
 
-/// A session under adjudication: the founding parameters plus the published
+/// A session under evaluation: the founding parameters plus the published
 /// Plies and their canonical attestations.
 struct Session {
     params: SessionParams,
@@ -98,7 +97,6 @@ impl Session {
         let period = Period::new(Duration::from_secs(BANK), None, None).expect("valid period");
         let params = SessionParams::new(
             eid(SESSION),
-            pk(ARBITER),
             Some(pk(TIMESTAMPER)),
             pk(FIRST),
             pk(SECOND),
@@ -129,12 +127,12 @@ impl Session {
                 ts(at),
             ));
         }
-        // The Request's own canonical attestation, well after the last half-move.
+        // The Conclusion's own canonical attestation, well after the last half-move.
         let cutoff = (i64::try_from(line.len()).expect("small") + 10) * TICK;
         attestations.push(Attestation::new(
             eid(171),
             pk(TIMESTAMPER),
-            eid(REQUEST),
+            eid(CONCLUSION),
             ts(cutoff),
         ));
 
@@ -146,8 +144,22 @@ impl Session {
         }
     }
 
-    fn request(&self, invoker: u8) -> AdjudicationRequest {
-        AdjudicationRequest::new(eid(REQUEST), pk(invoker), eid(SESSION), pk(ARBITER), ts(0))
+    /// A Conclusion by `invoker` claiming `status`/`result`.
+    fn conclusion(&self, invoker: u8, status: Status, result: Outcome3) -> Conclusion {
+        Conclusion::new(
+            eid(CONCLUSION),
+            pk(invoker),
+            eid(SESSION),
+            status,
+            result,
+            ts(0),
+        )
+    }
+
+    /// A Conclusion by `invoker` whose claim is a placeholder (not read by the
+    /// replay).
+    fn probe(&self, invoker: u8) -> Conclusion {
+        self.conclusion(invoker, Status::Resignation, Outcome3::Draw)
     }
 
     /// The natural-state replay (the chain builder and legality authority).
@@ -156,40 +168,62 @@ impl Session {
             &self.params,
             &self.plies,
             &self.attestations,
-            &self.request(FIRST),
+            &self.probe(FIRST),
         )
-        .expect("the Request is canonically attested");
-        // The chain is computed against the Request's canonical timing, and the
+        .expect("the Conclusion is canonically attested");
+        // The chain is computed against the Conclusion's canonical timing, and the
         // cutoff here is late enough to admit every published half-move.
         assert_eq!(natural.cutoff, ts(self.cutoff));
         natural
     }
 
-    /// The binding verdict for an invocation by `invoker`.
-    fn rule(&self, invoker: u8) -> Adjudication {
-        adjudicate(
+    /// The kernel result for a Conclusion by `invoker` — and, on the way, the
+    /// binding-by-correctness check: a Conclusion claiming exactly that result
+    /// conforms, one claiming the flipped outcome does not.
+    fn rule(&self, invoker: u8) -> KernelResult {
+        let result = kernel_result(
             &self.params,
             &self.plies,
             &self.attestations,
-            &self.request(invoker),
+            &self.probe(invoker),
         )
-        .expect("a conforming, attested Request always yields a verdict")
+        .expect("a canonically timed Conclusion by a player always has a result");
+        let right = self.conclusion(invoker, result.status(), result.result());
+        assert!(conforms(
+            &self.params,
+            &self.plies,
+            &self.attestations,
+            &right
+        ));
+        let flipped = match result.result() {
+            Outcome3::FirstWins => Outcome3::SecondWins,
+            Outcome3::SecondWins => Outcome3::FirstWins,
+            Outcome3::Draw => Outcome3::FirstWins,
+        };
+        let wrong = self.conclusion(invoker, result.status(), flipped);
+        assert!(!conforms(
+            &self.params,
+            &self.plies,
+            &self.attestations,
+            &wrong
+        ));
+        result
     }
 }
 
 /// The replay's terminal status, or `None` for a still-ongoing end position.
 fn termination(natural: &NaturalState<'_>) -> Option<Status> {
-    match &natural.conclusion {
-        Conclusion::Terminal(Verdict::Terminated { status, .. }, _) => Some(*status),
-        Conclusion::Terminal(Verdict::Ongoing, _) | Conclusion::Ongoing(_) => None,
+    match &natural.end {
+        ChainEnd::Terminal(Verdict::Terminated { status, .. }, _) => Some(*status),
+        ChainEnd::Terminal(Verdict::Ongoing, _) | ChainEnd::Ongoing(_) => None,
     }
 }
 
 /// The FEEN of a still-ongoing end position.
 fn ongoing_feen(natural: &NaturalState<'_>) -> String {
-    match &natural.conclusion {
-        Conclusion::Ongoing(state) => state.position().to_feen(),
-        Conclusion::Terminal(verdict, _) => {
+    match &natural.end {
+        ChainEnd::Ongoing(state) => state.position().to_feen(),
+        ChainEnd::Terminal(verdict, _) => {
             panic!("expected an ongoing end position, got {verdict:?}")
         }
     }
@@ -254,7 +288,7 @@ fn inert_tray_checkmate_binds_the_verdict() {
     // tray read as second's own reserve, a phantom drop appeared to interpose
     // on the checking rank, and a genuine checkmate classified as `Ongoing`.
     //
-    // The arbiter applies each selected Ply through `kernel::step`, so the
+    // The kernel applies each selected Ply through `kernel::step`, so the
     // misclassification reached the verdict directly. Observed on this exact
     // session, published crates, no other change:
     //
@@ -273,37 +307,37 @@ fn inert_tray_checkmate_binds_the_verdict() {
     assert_eq!(natural.chain.len(), 5);
     assert_eq!(natural.next_half_move(), 6);
     assert_eq!(termination(&natural), Some(Status::Checkmate));
-    match natural.conclusion {
-        Conclusion::Terminal(_, at) => assert_eq!(at, ts(5 * TICK)),
-        Conclusion::Ongoing(_) => panic!("expected the mate to terminate the chain"),
+    match natural.end {
+        ChainEnd::Terminal(_, at) => assert_eq!(at, ts(5 * TICK)),
+        ChainEnd::Ongoing(_) => panic!("expected the mate to terminate the chain"),
     }
 
     // The verdict is play-derived, so it does not depend on who invoked.
     for invoker in [FIRST, SECOND] {
-        let adjudication = session.rule(invoker);
-        assert_eq!(adjudication.status(), Status::Checkmate);
-        assert_eq!(adjudication.result(), Outcome3::FirstWins);
-        assert_eq!(adjudication.score(Side::First), 100);
-        assert_eq!(adjudication.score(Side::Second), 0);
+        let result = session.rule(invoker);
+        assert_eq!(result.status(), Status::Checkmate);
+        assert_eq!(result.result(), Outcome3::FirstWins);
+        assert_eq!(result.score(Side::First), 100);
+        assert_eq!(result.score(Side::Second), 0);
     }
 }
 
 #[test]
 fn inert_tray_checkmate_from_the_standard_mixed_start() {
-    // The same ending, adjudicated over the WHOLE game rather than a window, so
+    // The same ending, evaluated over the WHOLE game rather than a window, so
     // the inert tray is built inside the session from two empty hands.
     let session = Session::new(MIXED_START, &INERT_TRAY_GAME);
     let natural = session.replay();
     assert_eq!(natural.chain.len(), 15);
     assert_eq!(termination(&natural), Some(Status::Checkmate));
 
-    let adjudication = session.rule(FIRST);
-    assert_eq!(adjudication.status(), Status::Checkmate);
-    assert_eq!(adjudication.result(), Outcome3::FirstWins);
+    let result = session.rule(FIRST);
+    assert_eq!(result.status(), Status::Checkmate);
+    assert_eq!(result.result(), Outcome3::FirstWins);
 }
 
 #[test]
-fn every_pairing_is_adjudicated_end_to_end() {
+fn every_pairing_is_evaluated_end_to_end() {
     // The nine pairings kind `3422` can assign, each replayed from its published
     // starting position and ruled on. Eight terminate on the board; the
     // chess-second xiongqi session (`C/w`) is still ongoing at the cutoff and
@@ -438,9 +472,9 @@ fn every_pairing_is_adjudicated_end_to_end() {
             line.len(),
             "{label}: every published half-move must join the chain"
         );
-        let adjudication = session.rule(*invoker);
-        assert_eq!(adjudication.status(), *status, "{label}: status");
-        assert_eq!(adjudication.result(), *result, "{label}: result");
+        let ruled = session.rule(*invoker);
+        assert_eq!(ruled.status(), *status, "{label}: status");
+        assert_eq!(ruled.result(), *result, "{label}: result");
     }
 }
 
@@ -543,9 +577,9 @@ fn cross_variant_uchifuzume_is_skipped_never_a_loss() {
 
     // The illegal drop costs first nothing: it is second's invocation that
     // resolves, as a residual resignation against second.
-    let adjudication = session.rule(SECOND);
-    assert_eq!(adjudication.status(), Status::Resignation);
-    assert_eq!(adjudication.result(), Outcome3::FirstWins);
+    let result = session.rule(SECOND);
+    assert_eq!(result.status(), Status::Resignation);
+    assert_eq!(result.result(), Outcome3::FirstWins);
 }
 
 /// Seven half-moves from the published xiongqi/chess start: the Soldier walks

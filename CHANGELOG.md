@@ -4,6 +4,61 @@ All notable changes to this crate are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] — 2026-09-04
+
+**The crate is renamed `sashite-sanki-session`** (repository
+`sanki-session.rs`); `sashite-sanki-arbiter` 0.12.1 is its last release under
+the old name and is deprecated in favour of this one. The suite's 2026-09-04
+revision ([ADR-0033](https://github.com/sashite/web-specs.md/blob/main/adr/adr-0033-arbiterless-sessions.md))
+removes the arbiter: either player concludes a session with a **Conclusion**
+(kind `3425`) that is *binding by correctness* — valid iff it states the verdict
+the rule system yields at its own cutoff — and every consumer recomputes that
+verdict. The replay is unchanged; what changes is who invokes it, from what
+event, and what the crate answers.
+
+### Changed
+
+- **Breaking — `event::AdjudicationRequest` (kind `3424`, retired) is replaced
+  by `event::Conclusion` (kind `3425`).** A `Conclusion` carries what the
+  kernel reads — the signer (the invoker) and the timing (the cutoff) — plus
+  what it *claims*, `status: Status` and `result: Outcome3`, which the kernel
+  checks; `Conclusion::claim()` is that claim as a `Verdict`. It carries no
+  arbiter.
+- **Breaking — `SessionParams::new` loses its `arbiter` argument and
+  `SessionParams::arbiter()` is gone.** The constructor is now
+  `(session, timestamper, first, second, time_control, initial_position, anchor)`.
+- **Breaking — `verdict::adjudicate` → `verdict::kernel_result`**, returning
+  `Option<KernelResult>` (ex-`Adjudication`, same accessors: `status`,
+  `result`, `score`, plus `verdict()`). Same computation — the natural state at
+  the cutoff, then draw acceptance → abandonment timeout → residual resignation
+  — with the Conclusion's signer as the invoker and its canonical timing as the
+  cutoff. `None` when the Conclusion references another session, is signed by
+  a non-player, or is pending (no canonical timing); the "wrong arbiter" gate
+  is gone with the arbiter.
+- **Breaking — `verdict::select_request` → `verdict::select_conclusion`**,
+  which now takes the plies and attestations too: the canonical Conclusion is
+  the earliest *conforming* one (kind `3425` §Idempotence and finality), and
+  conformance is a full replay per candidate.
+- **Breaking — `natural_state::Conclusion` (how the chain ends) is renamed
+  `ChainEnd`**, and `NaturalState::conclusion` is renamed `NaturalState::end`,
+  freeing the name for the event. `natural_state` takes a `&Conclusion`.
+- `implicit::draw_acceptance` takes a `&Conclusion`.
+- `sashite-sanki-engine` bumped to 0.10.
+
+### Added
+
+- **`verdict::conforms(params, plies, attestations, conclusion) -> bool`** —
+  kind `3425` §Semantic constraints item 8: the claim equals the kernel result.
+  `false` for a pending Conclusion as well as for a wrong claim.
+- The README and the doc comments describe the arbiter-less model; the
+  conformance corpus is unchanged (its `note` fields still say "the arbiter"
+  in one place — wording only, shared byte for byte with the client until
+  the next corpus revision).
+
+128 tests pass (119 unit, 9 integration; four new — conformance, the premature
+claim, the earliest-conforming selection, two conforming Conclusions with
+different verdicts — and three retired with the arbiter).
+
 ## [0.12.1] — 2026-08-21
 
 A documentation-only patch, promoted to a release by the conformance gate:

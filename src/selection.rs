@@ -34,7 +34,7 @@
 //! normative anti-flooding bound of Move Encoding — Sanki §Bounding a slot's
 //! candidates: a flood of candidates costs sorting, never unbounded
 //! full-rule-system replays. It is driven directly by the shared
-//! `selection.json` conformance vectors, so the arbiter and the TypeScript client
+//! `selection.json` conformance vectors, so this kernel and the TypeScript client
 //! agree bit-for-bit on which Ply is canonical.
 //!
 //! Identical-content re-submissions are **deduplicated upstream** (they are

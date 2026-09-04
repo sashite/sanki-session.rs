@@ -1,14 +1,14 @@
 //! Implicit draw by agreement (Statuses — Sanki §Implicit draw by agreement).
 //!
 //! A player offers a draw by attaching the `draw` flag to their Ply; the
-//! opponent accepts by invoking the arbiter while that offer is the last
+//! opponent accepts by concluding the session while that offer is the last
 //! half-move of the chain. Playing the next half-move instead implicitly
 //! declines (the chain extends past the offer, and the condition below fails).
 //!
 //! - **Implicit draw by agreement** — the last Ply in the consecutive chain
-//!   carries the `draw` flag (an offer by its signer), and the triggering
-//!   Adjudication Request is signed by that signer's **opponent**: the
-//!   invocation accepts the offer. Result: `50/50`.
+//!   carries the `draw` flag (an offer by its signer), and the Conclusion is
+//!   signed by that signer's **opponent**: the invocation accepts the offer.
+//!   Result: `50/50`.
 //!
 //! The offer is carried by the chain's **last half-move at the cutoff** — the
 //! Ply the replay actually selected and applied for the last filled slot. Three
@@ -26,7 +26,7 @@
 //! the invoker, whatever the turn. That ordering lives in [`crate::verdict`];
 //! this module only detects the acceptance.
 
-use crate::event::AdjudicationRequest;
+use crate::event::Conclusion;
 use crate::natural_state::NaturalState;
 use crate::session::SessionParams;
 use sashite_sanki_engine::domain::outcome::Verdict;
@@ -35,7 +35,7 @@ use sashite_sanki_engine::domain::status::Status;
 /// The `agreement` verdict, if the invocation accepts a standing draw offer.
 ///
 /// Returns `Some(agreement)` when the last chain Ply offers a draw and the
-/// Request is signed by its signer's opponent; `None` otherwise (no offer, an
+/// Conclusion is signed by its signer's opponent; `None` otherwise (no offer, an
 /// offer extended past by play, an offerer invoking on their own offer, or a
 /// non-player invoker).
 ///
@@ -46,9 +46,9 @@ use sashite_sanki_engine::domain::status::Status;
 pub fn draw_acceptance(
     params: &SessionParams,
     natural: &NaturalState<'_>,
-    request: &AdjudicationRequest,
+    conclusion: &Conclusion,
 ) -> Option<Verdict> {
-    let invoker = params.side_of(request.signer)?;
+    let invoker = params.side_of(conclusion.signer)?;
     let last = natural.chain.last()?;
     if !last.ply.draw {
         return None;
@@ -67,12 +67,12 @@ mod tests {
     )]
 
     use super::draw_acceptance;
-    use crate::event::{AdjudicationRequest, EventId, Ply, PublicKey};
-    use crate::natural_state::{Conclusion, NaturalState};
+    use crate::event::{Conclusion, EventId, Ply, PublicKey};
+    use crate::natural_state::{ChainEnd, NaturalState};
     use crate::race_resolution::CanonicalPly;
     use crate::session::SessionParams;
     use sashite_sanki_engine::domain::outcome::Verdict;
-    use sashite_sanki_engine::domain::status::Status;
+    use sashite_sanki_engine::domain::status::{Outcome3, Status};
     use sashite_sanki_engine::domain::time::{Duration, Timestamp};
     use sashite_sanki_engine::domain::time_control::{Period, TimeControl};
     use sashite_sanki_engine::position::Position;
@@ -109,7 +109,6 @@ mod tests {
         let period = Period::new(Duration::from_secs(600), None, None).expect("valid period");
         SessionParams::new(
             eid(SESSION),
-            pk(2),
             Some(pk(99)),
             pk(FIRST),
             pk(SECOND),
@@ -119,8 +118,15 @@ mod tests {
         )
     }
 
-    fn request(signer: u8) -> AdjudicationRequest {
-        AdjudicationRequest::new(eid(170), pk(signer), eid(SESSION), pk(2), ts(0))
+    fn conclusion(signer: u8) -> Conclusion {
+        Conclusion::new(
+            eid(170),
+            pk(signer),
+            eid(SESSION),
+            Status::Agreement,
+            Outcome3::Draw,
+            ts(0),
+        )
     }
 
     #[test]
@@ -134,9 +140,9 @@ mod tests {
                 at: ts(100),
             }],
             cutoff: ts(1000),
-            conclusion: Conclusion::Ongoing(Box::new(params().initial_state())),
+            end: ChainEnd::Ongoing(Box::new(params().initial_state())),
         };
-        let verdict = draw_acceptance(&params(), &natural, &request(SECOND));
+        let verdict = draw_acceptance(&params(), &natural, &conclusion(SECOND));
         assert_eq!(verdict, Some(Verdict::drawn(Status::Agreement)));
     }
 
@@ -149,9 +155,9 @@ mod tests {
                 at: ts(100),
             }],
             cutoff: ts(1000),
-            conclusion: Conclusion::Ongoing(Box::new(params().initial_state())),
+            end: ChainEnd::Ongoing(Box::new(params().initial_state())),
         };
-        assert!(draw_acceptance(&params(), &natural, &request(SECOND)).is_none());
+        assert!(draw_acceptance(&params(), &natural, &conclusion(SECOND)).is_none());
     }
 
     #[test]
@@ -172,9 +178,9 @@ mod tests {
                 },
             ],
             cutoff: ts(1000),
-            conclusion: Conclusion::Ongoing(Box::new(params().initial_state())),
+            end: ChainEnd::Ongoing(Box::new(params().initial_state())),
         };
-        assert!(draw_acceptance(&params(), &natural, &request(FIRST)).is_none());
+        assert!(draw_acceptance(&params(), &natural, &conclusion(FIRST)).is_none());
     }
 
     #[test]
@@ -188,9 +194,9 @@ mod tests {
                 at: ts(100),
             }],
             cutoff: ts(1000),
-            conclusion: Conclusion::Ongoing(Box::new(params().initial_state())),
+            end: ChainEnd::Ongoing(Box::new(params().initial_state())),
         };
-        assert!(draw_acceptance(&params(), &natural, &request(FIRST)).is_none());
+        assert!(draw_acceptance(&params(), &natural, &conclusion(FIRST)).is_none());
     }
 
     #[test]
@@ -198,9 +204,9 @@ mod tests {
         let natural = NaturalState {
             chain: Vec::new(),
             cutoff: ts(1000),
-            conclusion: Conclusion::Ongoing(Box::new(params().initial_state())),
+            end: ChainEnd::Ongoing(Box::new(params().initial_state())),
         };
-        assert!(draw_acceptance(&params(), &natural, &request(SECOND)).is_none());
+        assert!(draw_acceptance(&params(), &natural, &conclusion(SECOND)).is_none());
     }
 
     #[test]
@@ -212,9 +218,9 @@ mod tests {
                 at: ts(100),
             }],
             cutoff: ts(1000),
-            conclusion: Conclusion::Ongoing(Box::new(params().initial_state())),
+            end: ChainEnd::Ongoing(Box::new(params().initial_state())),
         };
-        assert!(draw_acceptance(&params(), &natural, &request(77)).is_none());
+        assert!(draw_acceptance(&params(), &natural, &conclusion(77)).is_none());
     }
 
     // --- Which Ply carries the standing offer, over a REAL replay ----------
@@ -224,7 +230,7 @@ mod tests {
     // offer hangs on — is the one the selection rule actually produces.
 
     const TIMESTAMPER: u8 = 99;
-    const REQUEST: u8 = 170;
+    const CONCLUSION: u8 = 170;
     // A rook-and-king endgame: a stock of legal moves for the replay.
     const ROOK_KING: &str = "4k^3/8/8/8/8/8/8/R3K^3 / W/w";
     const RA1A4: &str = "[\"a1\",\"a4\",null]"; // first, step 1
@@ -255,7 +261,6 @@ mod tests {
         let period = Period::new(Duration::from_secs(100_000), None, None).expect("valid period");
         SessionParams::new(
             eid(SESSION),
-            pk(2),
             Some(pk(TIMESTAMPER)),
             pk(FIRST),
             pk(SECOND),
@@ -271,17 +276,13 @@ mod tests {
         plies: &[Ply],
         attestations: &[crate::event::Attestation],
     ) -> (bool, bool) {
-        let natural = crate::natural_state::natural_state(
-            params,
-            plies,
-            attestations,
-            &AdjudicationRequest::new(eid(REQUEST), pk(FIRST), eid(SESSION), pk(2), ts(0)),
-        )
-        .expect("attested request");
+        let natural =
+            crate::natural_state::natural_state(params, plies, attestations, &conclusion(FIRST))
+                .expect("attested conclusion");
         let agreement = Some(Verdict::drawn(Status::Agreement));
         (
-            draw_acceptance(params, &natural, &request(FIRST)) == agreement,
-            draw_acceptance(params, &natural, &request(SECOND)) == agreement,
+            draw_acceptance(params, &natural, &conclusion(FIRST)) == agreement,
+            draw_acceptance(params, &natural, &conclusion(SECOND)) == agreement,
         )
     }
 
@@ -296,7 +297,11 @@ mod tests {
             played(1, FIRST, 1, false, RA1A4),
             played(2, SECOND, 1, true, KE8E7),
         ];
-        let atts = [att(101, 1, 100), att(102, 2, 50), att(171, REQUEST, 1000)];
+        let atts = [
+            att(101, 1, 100),
+            att(102, 2, 50),
+            att(171, CONCLUSION, 1000),
+        ];
         assert_eq!(acceptances(&p, &plies, &atts), (true, false));
     }
 
@@ -310,7 +315,11 @@ mod tests {
             played(1, FIRST, 1, true, RA1A4),
             played(2, SECOND, 1, true, KE8E7),
         ];
-        let atts = [att(101, 1, 100), att(102, 2, 200), att(171, REQUEST, 1000)];
+        let atts = [
+            att(101, 1, 100),
+            att(102, 2, 200),
+            att(171, CONCLUSION, 1000),
+        ];
         assert_eq!(acceptances(&p, &plies, &atts), (true, false));
     }
 
@@ -328,7 +337,7 @@ mod tests {
             att(101, 1, 100),
             att(102, 2, 200),
             att(103, 3, 300),
-            att(171, REQUEST, 1000),
+            att(171, CONCLUSION, 1000),
         ];
         assert_eq!(acceptances(&p, &plies, &atts), (false, false));
     }
@@ -344,7 +353,11 @@ mod tests {
             played(1, FIRST, 1, false, RA1A4),
             played(2, FIRST, 1, true, RA1A5),
         ];
-        let atts = [att(101, 1, 100), att(102, 2, 200), att(171, REQUEST, 1000)];
+        let atts = [
+            att(101, 1, 100),
+            att(102, 2, 200),
+            att(171, CONCLUSION, 1000),
+        ];
         assert_eq!(acceptances(&p, &plies, &atts), (false, false));
     }
 
@@ -359,21 +372,29 @@ mod tests {
             played(1, FIRST, 1, true, RA1A4),
             played(2, SECOND, 1, false, KE8E6),
         ];
-        let atts = [att(101, 1, 100), att(102, 2, 200), att(171, REQUEST, 1000)];
+        let atts = [
+            att(101, 1, 100),
+            att(102, 2, 200),
+            att(171, CONCLUSION, 1000),
+        ];
         assert_eq!(acceptances(&p, &plies, &atts), (false, true));
     }
 
     #[test]
     fn a_reply_after_the_cutoff_does_not_decline_the_offer() {
         // `second`'s reply is canonically timed after the cutoff, so it is not
-        // part of the natural state the arbiter rules on: at the cutoff the offer
+        // part of the natural state the kernel evaluates: at the cutoff the offer
         // was still the last half-move, and the invocation accepts it.
         let p = rook_params();
         let plies = [
             played(1, FIRST, 1, true, RA1A4),
             played(2, SECOND, 1, false, KE8E7),
         ];
-        let atts = [att(101, 1, 100), att(102, 2, 900), att(171, REQUEST, 500)];
+        let atts = [
+            att(101, 1, 100),
+            att(102, 2, 900),
+            att(171, CONCLUSION, 500),
+        ];
         assert_eq!(acceptances(&p, &plies, &atts), (false, true));
     }
 }

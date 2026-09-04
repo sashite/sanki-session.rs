@@ -18,7 +18,7 @@
 //!   (it is *pending*); in self-timed mode every Ply has timing.
 //!
 //! The greedy matching of Pairings (kind `3419`) is a founding-time concern,
-//! outside per-session adjudication, and is not implemented here.
+//! outside per-session evaluation, and is not implemented here.
 
 use crate::event::{Attestation, EventId, Ply, PublicKey};
 use sashite_sanki_engine::domain::time::Timestamp;

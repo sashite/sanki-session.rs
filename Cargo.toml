@@ -1,18 +1,18 @@
 [package]
-name = "sashite-sanki-arbiter"
-version = "0.12.1"
+name = "sashite-sanki-session"
+version = "0.13.0"
 edition = "2021"
 rust-version = "1.81"
 license = "Apache-2.0"
-description = "Adjudication logic for the Sanki game suite over an abstract event model, built for Sashité."
-repository = "https://github.com/sashite/sanki-arbiter.rs"
+description = "Session kernel for the Sanki game suite over an abstract event model — the verdict a session's public events yield, built for Sashité."
+repository = "https://github.com/sashite/sanki-session.rs"
 homepage = "https://sashite.com/"
 readme = "README.md"
-keywords = ["chess", "ogi", "xiongqi", "board-game", "arbiter"]
+keywords = ["chess", "ogi", "xiongqi", "board-game", "session"]
 categories = ["games", "game-development"]
 
 [dependencies]
-sashite-sanki-engine = "0.9"
+sashite-sanki-engine = "0.10"
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

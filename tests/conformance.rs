@@ -12,7 +12,7 @@
 //!   position, plies with their canonical-attestation timings, and a cutoff. The
 //!   asserted **selected chain** is the consensus property — the TypeScript client
 //!   replays the same `scenarios.json` through `forgivingPlyChain` and must select
-//!   the same chain, so the arbiter cannot finalise a chain the client would not.
+//!   the same chain, so the kernel cannot finalise a chain the client would not.
 //!   Since v4 (ADR-0010) each vector also pins the **termination**: the replay must
 //!   conclude `Terminal` with the expected status on the chain's last ply (the
 //!   background draws — insufficiency, repetition, the move limit — truncate it),
@@ -31,14 +31,15 @@
 
 use std::path::PathBuf;
 
-use sashite_sanki_arbiter::event::{AdjudicationRequest, Attestation, EventId, Ply, PublicKey};
-use sashite_sanki_arbiter::natural_state::{natural_state, Conclusion};
-use sashite_sanki_arbiter::selection::{select_candidate, Candidate, Selection};
-use sashite_sanki_arbiter::session::SessionParams;
 use sashite_sanki_engine::domain::outcome::Verdict;
+use sashite_sanki_engine::domain::status::{Outcome3, Status};
 use sashite_sanki_engine::domain::time::{Duration, Timestamp};
 use sashite_sanki_engine::domain::time_control::{Period, TimeControl};
 use sashite_sanki_engine::position::Position;
+use sashite_sanki_session::event::{Attestation, Conclusion, EventId, Ply, PublicKey};
+use sashite_sanki_session::natural_state::{natural_state, ChainEnd};
+use sashite_sanki_session::selection::{select_candidate, Candidate, Selection};
+use sashite_sanki_session::session::SessionParams;
 
 #[derive(serde::Deserialize)]
 struct Corpus {
@@ -176,7 +177,6 @@ struct ScenarioPly {
 const FIRST: u8 = 10;
 const SECOND: u8 = 20;
 const TIMESTAMPER: u8 = 99;
-const ARBITER: u8 = 2;
 
 fn pk(byte: u8) -> PublicKey {
     PublicKey::from_bytes([byte; 32])
@@ -239,12 +239,11 @@ fn scenario_conformance() {
     assert!(!corpus.vectors.is_empty(), "the corpus has no vectors");
 
     let session = eid_from_str("session");
-    let request_id = eid_from_str("request");
+    let conclusion_id = eid_from_str("conclusion");
 
     for scenario in &corpus.vectors {
         let params = SessionParams::new(
             session,
-            pk(ARBITER),
             Some(pk(TIMESTAMPER)),
             pk(FIRST),
             pk(SECOND),
@@ -285,24 +284,26 @@ fn scenario_conformance() {
                 )
             })
             .collect();
-        // The Request's canonical attestation sets the cutoff the chain is computed against.
+        // The Conclusion's canonical attestation sets the cutoff the chain is
+        // computed against; its claim is not read by the replay.
         attestations.push(Attestation::new(
-            eid_from_str("att-request"),
+            eid_from_str("att-conclusion"),
             pk(TIMESTAMPER),
-            request_id,
+            conclusion_id,
             Timestamp::from_unix(scenario.cutoff),
         ));
 
-        let request = AdjudicationRequest::new(
-            request_id,
+        let conclusion = Conclusion::new(
+            conclusion_id,
             pk(FIRST),
             session,
-            pk(ARBITER),
+            Status::Resignation,
+            Outcome3::SecondWins,
             Timestamp::from_unix(scenario.cutoff),
         );
 
-        let natural =
-            natural_state(&params, &plies, &attestations, &request).expect("attested request");
+        let natural = natural_state(&params, &plies, &attestations, &conclusion)
+            .expect("attested conclusion");
         let chain: Vec<String> = natural
             .chain
             .iter()
@@ -317,9 +318,9 @@ fn scenario_conformance() {
 
         // The replay's conclusion must match the pinned termination: a terminal
         // verdict with the expected status, or a still-ongoing end position.
-        let actual_termination = match &natural.conclusion {
-            Conclusion::Terminal(Verdict::Terminated { status, .. }, _) => Some(status.to_string()),
-            Conclusion::Terminal(Verdict::Ongoing, _) | Conclusion::Ongoing(_) => None,
+        let actual_termination = match &natural.end {
+            ChainEnd::Terminal(Verdict::Terminated { status, .. }, _) => Some(status.to_string()),
+            ChainEnd::Terminal(Verdict::Ongoing, _) | ChainEnd::Ongoing(_) => None,
         };
         let expected_termination = scenario
             .expected_termination

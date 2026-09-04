@@ -65,24 +65,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3c64dab0f7e9471b7ace3b496da79024f44e2f4933ebe39d294d0984f309f3c"
 
 [[package]]
-name = "sashite-sanki-arbiter"
-version = "0.12.1"
-dependencies = [
- "sashite-sanki-engine",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "sashite-sanki-engine"
-version = "0.9.0"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af69334cfbe486d23d362b14115f1183b3bbd5ad66bfdcbfbeb6056161bab899"
+checksum = "f04b5517ea7d25bb6a88a04d2a7da01f3c8a542260d70003fc9f14908e3e3531"
 dependencies = [
  "sashite-epin",
  "sashite-feen",
  "sashite-qi",
  "sashite-sin",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "sashite-sanki-session"
+version = "0.13.0"
+dependencies = [
+ "sashite-sanki-engine",
  "serde",
  "serde_json",
 ]
@@ -138,9 +138,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.3"
+version = "3.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
+checksum = "12df2e0110f65b775f769bb17ef989067a1d931b2eb822bd4346631eeada89f9"
 dependencies = [
  "proc-macro2",
  "quote",

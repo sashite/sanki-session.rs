@@ -1,30 +1,36 @@
-//! Typed Nostr event models the arbiter reasons about.
+//! Typed Nostr event models the session kernel reasons about.
 //!
-//! The arbiter consumes events that the application has already received,
+//! The kernel consumes events that the application has already received,
 //! signature-verified (NIP-01), and parsed from their raw tag form. This module
-//! gives those events a typed shape reduced to what arbitration needs:
+//! gives those events a typed shape reduced to what the kernel needs:
 //!
 //! - [`Ply`] (kind `3423`) — a played half-move: its `step`, signer, optional
 //!   `draw` flag, and opaque `content` (decoded later by the kernel);
 //! - [`Attestation`] (kind `3410`) — the designated timestamper's receipt
 //!   witness, carrying the **canonical timing** of the attested event;
-//! - [`AdjudicationRequest`] (kind `3424`) — a player's invocation of the
-//!   arbiter.
+//! - [`Conclusion`] (kind `3425`) — a player's verdict on the session, binding
+//!   by correctness: its canonical timing is the **cutoff** at which the
+//!   session is evaluated, its signer the **invoker**, and the verdict it
+//!   *claims* is checked against the one the kernel yields
+//!   ([`crate::verdict::conforms`]).
 //!
 //! Timing depends on the session's mode. A suite event's own `created_at` is the
 //! signer's self-claim. When the session designates a timestamper (attested
 //! mode), that self-claim is superseded by the [`Attestation`]'s `created_at`
-//! and never drives race resolution (kind `3423` §Time accounting; kind `3424`
-//! §Invocation timing). When the session is self-timed — no timestamper, the
-//! default — there is no attestation, and the relay-enforced `created_at` IS the
-//! canonical timing (nostr-integration §Timing). [`Ply`] and
-//! [`AdjudicationRequest`] therefore carry `created_at`; it is consulted only in
-//! the self-timed branch of [`crate::race_resolution::canonical_timing`].
+//! and never drives race resolution (kind `3423` §Time accounting; kind `3425`
+//! §Attestation by the designated timestamper). When the session is self-timed
+//! — no timestamper, the default — there is no attestation, and the
+//! relay-enforced `created_at` IS the canonical timing (nostr-integration
+//! §Timing). [`Ply`] and [`Conclusion`] therefore carry `created_at`; it is
+//! consulted only in the self-timed branch of
+//! [`crate::race_resolution::canonical_timing`].
 //!
 //! Identity is carried by [`EventId`] and [`PublicKey`], 32-byte newtypes over
 //! the canonical Nostr encoding. [`EventId`] is ordered: the byte order is the
 //! "smallest event ID" tiebreak of race resolution.
 
+use sashite_sanki_engine::domain::outcome::Verdict;
+use sashite_sanki_engine::domain::status::{Outcome3, Status};
 use sashite_sanki_engine::domain::time::Timestamp;
 
 /// A 32-byte Nostr event identifier.
@@ -149,7 +155,7 @@ pub struct Ply {
 }
 
 impl Ply {
-    /// Assembles a typed Ply from its arbiter-relevant fields.
+    /// Assembles a typed Ply from its kernel-relevant fields.
     #[inline]
     #[must_use]
     pub const fn new(
@@ -176,7 +182,7 @@ impl Ply {
 /// An Event Timestamp Attestation (kind `3410`).
 ///
 /// Authoritative for timing only when `signer` is the session's designated
-/// timestamper; the arbiter applies that restriction. `created_at` is the
+/// timestamper; the kernel applies that restriction. `created_at` is the
 /// canonical timing the attestation confers on the attested event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Attestation {
@@ -184,7 +190,7 @@ pub struct Attestation {
     pub id: EventId,
     /// The attesting signer (authoritative iff the designated timestamper).
     pub signer: PublicKey,
-    /// The attested event (a Ply, an Adjudication Request, …).
+    /// The attested event (a Ply, a Conclusion, …).
     pub attests: EventId,
     /// The canonical timing conferred on the attested event.
     pub created_at: Timestamp,
@@ -209,43 +215,74 @@ impl Attestation {
     }
 }
 
-/// An Adjudication Request (kind `3424`): a player's invocation of the arbiter.
+/// A Conclusion (kind `3425`): a player's verdict on the session.
 ///
-/// Carries no claims — the arbiter rules on the natural state of events. The
-/// request's authoritative timing is its [`Attestation`]'s `created_at` in
-/// attested mode, or its own relay-enforced `created_at` when self-timed.
+/// The event fixes two things the kernel reads — **who** concludes (its signer,
+/// the invoker of the post-chain conventions: draw acceptance, residual
+/// resignation) and **when** (its canonical timing, the cutoff at which the
+/// natural state is evaluated) — and **claims** one thing the kernel checks: the
+/// termination status (the event's `content`) and the result distribution (its
+/// `result` tags). A Conclusion is conforming iff its claim equals the verdict
+/// the kernel yields at its cutoff (kind `3425` §Semantic constraints, item 8 —
+/// *binding by correctness*); see [`crate::verdict::conforms`].
+///
+/// The application maps the `result` tags to an [`Outcome3`] — `100/0`, `50/50`
+/// or `0/100` in seat order — and the `content` to a [`Status`] before building
+/// the value; a Conclusion whose tags admit no such mapping (an unknown status
+/// token, an uncommon split) cannot be conforming under the `sanki` rule
+/// system and needs no kernel to be rejected.
+///
+/// The claim is inert for the *computation*: [`crate::verdict::kernel_result`]
+/// reads only the signer and the cutoff. A caller wanting to know what verdict a
+/// Conclusion published *now* would carry — a client before it signs one, a bot
+/// deciding whether to claim a win on time — builds a synthetic Conclusion timed
+/// "now" with any claim and reads the kernel's answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AdjudicationRequest {
-    /// The request event's id.
+pub struct Conclusion {
+    /// The Conclusion event's id (meta-resolution tiebreak).
     pub id: EventId,
-    /// The invoking player's pubkey.
+    /// The concluding player's pubkey — the invoker.
     pub signer: PublicKey,
     /// The referenced Game Session (kind `3422`).
     pub session: EventId,
-    /// The designated arbiter named by the request's `p` tag.
-    pub arbiter: PublicKey,
+    /// The claimed termination status (the event's `content`).
+    pub status: Status,
+    /// The claimed result distribution (the event's `result` tags).
+    pub result: Outcome3,
     /// The event's own (relay-enforced) `created_at` — the canonical cutoff
     /// timing when the session is self-timed; ignored when attested.
     pub created_at: Timestamp,
 }
 
-impl AdjudicationRequest {
-    /// Assembles a typed adjudication request.
+impl Conclusion {
+    /// Assembles a typed Conclusion.
     #[inline]
     #[must_use]
     pub const fn new(
         id: EventId,
         signer: PublicKey,
         session: EventId,
-        arbiter: PublicKey,
+        status: Status,
+        result: Outcome3,
         created_at: Timestamp,
     ) -> Self {
         Self {
             id,
             signer,
             session,
-            arbiter,
+            status,
+            result,
             created_at,
+        }
+    }
+
+    /// The verdict this Conclusion claims, as the kernel expresses one.
+    #[inline]
+    #[must_use]
+    pub const fn claim(&self) -> Verdict {
+        Verdict::Terminated {
+            status: self.status,
+            result: self.result,
         }
     }
 }
@@ -259,7 +296,9 @@ mod tests {
         clippy::indexing_slicing
     )]
 
-    use super::{AdjudicationRequest, Attestation, EventId, Ply, PublicKey};
+    use super::{Attestation, Conclusion, EventId, Ply, PublicKey};
+    use sashite_sanki_engine::domain::outcome::Verdict;
+    use sashite_sanki_engine::domain::status::{Outcome3, Status};
     use sashite_sanki_engine::domain::time::Timestamp;
 
     #[test]
@@ -413,16 +452,24 @@ mod tests {
     }
 
     #[test]
-    fn adjudication_request_links_session_and_arbiter() {
-        let request = AdjudicationRequest::new(
+    fn conclusion_links_session_and_carries_its_claim() {
+        let conclusion = Conclusion::new(
             EventId::from_bytes([1; 32]),
             PublicKey::from_bytes([2; 32]),
             EventId::from_bytes([4; 32]),
-            PublicKey::from_bytes([5; 32]),
+            Status::Checkmate,
+            Outcome3::FirstWins,
             Timestamp::from_unix(2000),
         );
-        assert_eq!(request.session, EventId::from_bytes([4; 32]));
-        assert_eq!(request.arbiter, PublicKey::from_bytes([5; 32]));
-        assert_eq!(request.created_at, Timestamp::from_unix(2000));
+        assert_eq!(conclusion.session, EventId::from_bytes([4; 32]));
+        assert_eq!(conclusion.signer, PublicKey::from_bytes([2; 32]));
+        assert_eq!(conclusion.created_at, Timestamp::from_unix(2000));
+        assert_eq!(
+            conclusion.claim(),
+            Verdict::Terminated {
+                status: Status::Checkmate,
+                result: Outcome3::FirstWins,
+            }
+        );
     }
 }

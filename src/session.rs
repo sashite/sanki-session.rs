@@ -1,21 +1,25 @@
-//! `SessionParams` — the session-constant configuration the arbiter rules on.
+//! `SessionParams` — the session-constant configuration the kernel evaluates.
 //!
 //! A session's invariant parameters are spread across several founding events;
 //! the application assembles them, after cross-event validation, into one
 //! aggregate:
 //!
-//! - from the **Game Session** (kind `3422`): the two players and their sides,
+//! - from the **Game Session** (kind `3422`): the two players and their seats,
 //!   the per-player variants (carried by the initial position's styles), the
-//!   initial position, the arbiter (its signer), and the session's event id;
-//! - from the **founding** (kinds `3420`/`3421` or `3418`/`3419`): the time
-//!   control and the OPTIONAL designated timestamper (absent → the session is
+//!   initial position, and the session's event id;
+//! - from the **founding** (kind `3420`, or `3418`/`3419`): the time control
+//!   and the OPTIONAL designated timestamper (absent → the session is
 //!   self-timed, its canonical timing being the events' own relay-enforced
-//!   `created_at`; attestation is a dormant capability);
+//!   `created_at`; attestation is a dormant capability). The `rules` term the
+//!   founding carries is not held here: this crate *is* the reference
+//!   implementation of the `sashite.sanki.kernel/1` rule system, and checking
+//!   that a session's manifest is one it implements is the caller's concern
+//!   (`sashite_sanki_engine::rules`);
 //! - from t₀, the canonical session start — the Session Start Attestation (kind
 //!   `3410`) in attested mode, or the Game Session's own `created_at` when
 //!   self-timed.
 //!
-//! This module is a pure aggregate plus the lookups the arbiter layers need:
+//! This module is a pure aggregate plus the lookups the kernel layers need:
 //! mapping a signer to its side, naming the player on a side, recognizing the
 //! timestamper, and mapping a **play-order position** (1-based half-move index)
 //! to its slot — the side on move and that side's `step` (the signer's own move
@@ -31,11 +35,10 @@ use sashite_sanki_engine::domain::time_control::TimeControl;
 use sashite_sanki_engine::kernel::state::SessionState;
 use sashite_sanki_engine::position::Position;
 
-/// The invariant parameters of an arbitered session.
+/// The invariant parameters of a session.
 #[derive(Debug, Clone)]
 pub struct SessionParams {
     session: EventId,
-    arbiter: PublicKey,
     /// The designated timestamper (attested mode), or `None` when self-timed.
     timestamper: Option<PublicKey>,
     first: PublicKey,
@@ -47,16 +50,15 @@ pub struct SessionParams {
 
 impl SessionParams {
     /// Assembles the session parameters. `first` and `second` are the players
-    /// assigned to the corresponding sides by the Game Session; `anchor` is t₀,
-    /// the canonical attestation timing of the Game Session.
-    // A faithful constructor for an 8-field aggregate; grouping the fields would
+    /// assigned to the corresponding seats by the Game Session; `anchor` is t₀,
+    /// the canonical session start (kind `3422` §Canonical session start).
+    // A faithful constructor for a 7-field aggregate; grouping the fields would
     // only obscure them.
     #[allow(clippy::too_many_arguments)]
     #[inline]
     #[must_use]
     pub const fn new(
         session: EventId,
-        arbiter: PublicKey,
         timestamper: Option<PublicKey>,
         first: PublicKey,
         second: PublicKey,
@@ -66,7 +68,6 @@ impl SessionParams {
     ) -> Self {
         Self {
             session,
-            arbiter,
             timestamper,
             first,
             second,
@@ -81,13 +82,6 @@ impl SessionParams {
     #[must_use]
     pub const fn session(&self) -> EventId {
         self.session
-    }
-
-    /// The designated arbiter (the Game Session's signer).
-    #[inline]
-    #[must_use]
-    pub const fn arbiter(&self) -> PublicKey {
-        self.arbiter
     }
 
     /// The designated timestamper (whose attestations are authoritative), or
@@ -169,7 +163,7 @@ impl SessionParams {
     /// Session (kind `3422`) supplies, an **initial position with `first` to
     /// move**; the engine's own turn tracking then stays in lockstep with it
     /// half-move for half-move (pinned by `verdict`'s
-    /// `the_engine_turn_tracks_the_arbiter_play_order`). `half_move` is 1-based:
+    /// `the_engine_turn_tracks_the_kernel_play_order`). `half_move` is 1-based:
     /// `0` denotes no slot and its answer is meaningless.
     #[inline]
     #[must_use]
@@ -246,7 +240,6 @@ mod tests {
     fn params() -> SessionParams {
         SessionParams::new(
             id(1),
-            pk(2),
             Some(pk(3)),
             pk(10),
             pk(20),
@@ -287,7 +280,6 @@ mod tests {
         // pubkey is ever recognised as the (absent) timestamper.
         let p = SessionParams::new(
             id(1),
-            pk(2),
             None,
             pk(10),
             pk(20),
@@ -359,15 +351,15 @@ mod tests {
 
     #[test]
     fn side_of_maps_only_the_two_players() {
-        // The `None` here is the gate that keeps a non-player's Adjudication
-        // Request from resolving as a resignation (kind `3424` §Semantic
-        // constraints, item 3), so it must not be approximate: only the two exact
-        // 32-byte player keys map.
+        // The `None` here is the gate that keeps a non-player's Conclusion from
+        // resolving as a resignation (kind `3425` §Semantic constraints, item
+        // 3), so it must not be approximate: only the two exact 32-byte player
+        // keys map.
         let p = params();
         assert_eq!(p.side_of(pk(10)), Some(Side::First));
         assert_eq!(p.side_of(pk(20)), Some(Side::Second));
         for stranger in [
-            pk(2), // the arbiter
+            pk(2), // a bystander
             pk(3), // the timestamper
             pk(0), // the all-zero key
             pk(255),
@@ -402,7 +394,6 @@ mod tests {
         .expect("valid period");
         let p = SessionParams::new(
             id(1),
-            pk(2),
             Some(pk(3)),
             pk(10),
             pk(20),
@@ -437,7 +428,6 @@ mod tests {
     fn accessors() {
         let p = params();
         assert_eq!(p.session(), id(1));
-        assert_eq!(p.arbiter(), pk(2));
         assert_eq!(p.timestamper(), Some(pk(3)));
         assert_eq!(p.anchor(), Timestamp::from_unix(1000));
         assert_eq!(p.initial_position().to_feen(), START_FEEN);

@@ -1,6 +1,7 @@
-//! The natural state of events at adjudication (kind `3425` §Natural state).
+//! The natural state of events at the cutoff (kind `3425` §Natural state of
+//! events at the cutoff).
 //!
-//! When the arbiter rules, it replays the session's play order from its first
+//! To evaluate a session the kernel replays its play order from its first
 //! half-move, selecting the canonical Ply for each successive slot under the
 //! **forgiving-premove** rule ([`crate::selection`]) and applying it through the
 //! engine. The replay is a single pass that is at once the chain builder and the
@@ -11,9 +12,9 @@
 //! alternation), the candidates are the Plies for that slot whose canonical
 //! timing lies in `[t₀, cutoff]` — `t₀` the session start (a Ply timed before
 //! t₀ is invalid, kind `3423` §Time accounting, and never enters a slot —
-//! deciders' confirmation of 2026-07-19), the `cutoff` the
-//! triggering Request's canonical timing (so a player cannot race the arbiter by
-//! playing after invoking). Identical-content re-submissions are idempotent
+//! deciders' confirmation of 2026-07-19), the `cutoff` the Conclusion's own
+//! canonical timing (so a player cannot race a Conclusion by playing after it —
+//! kind `3425` §Implications, *no post-conclusion racing*). Identical-content re-submissions are idempotent
 //! retries, not alternatives: per content, only the **race-canonical
 //! representative** (smallest canonical timing, then smallest event id — kind
 //! `3423` §Race resolution) enters the two-window selection, so duplicates
@@ -39,11 +40,13 @@
 //! end position for the post-chain resolution ([`crate::verdict`]). There is no
 //! `illegalmove` termination — an illegal Ply is skipped, never a loss.
 //!
-//! In attested mode, if the Request is not yet canonically attested the cutoff is
-//! undefined and the natural state cannot be computed ([`natural_state`] returns
-//! `None`); self-timed, the request's own `created_at` is always a defined cutoff.
+//! In attested mode, if the Conclusion is not yet canonically attested the
+//! cutoff is undefined and the natural state cannot be computed
+//! ([`natural_state`] returns `None` — the Conclusion is *pending*, kind `3425`
+//! §Until the Conclusion has canonical timing); self-timed, its own
+//! `created_at` is always a defined cutoff.
 
-use crate::event::{AdjudicationRequest, Attestation, EventId, Ply};
+use crate::event::{Attestation, Conclusion, EventId, Ply};
 use crate::race_resolution::{canonical_timing, CanonicalPly};
 use crate::selection::{select_candidate, Candidate, Selection, CANDIDATE_CAP};
 use crate::session::SessionParams;
@@ -58,7 +61,7 @@ use std::collections::BTreeMap;
 
 /// How the replayed chain ends.
 #[derive(Debug, Clone)]
-pub enum Conclusion {
+pub enum ChainEnd {
     /// The chain reached a terminal verdict during replay — a rule-system ending
     /// or a played-Ply timeout — at the given attestation time. Post-chain
     /// resolution does not apply.
@@ -71,17 +74,17 @@ pub enum Conclusion {
 }
 
 /// The natural state: the selected canonical Ply chain, the cutoff it was
-/// computed against, and how the chain concluded.
+/// computed against, and how the chain ended.
 #[derive(Debug, Clone)]
 pub struct NaturalState<'a> {
     /// The selected canonical Plies, `chain[i]` being the Ply at play-order
     /// position `i + 1`. A skipped illegal candidate is **not** included (it is not
     /// a played half-move); a terminating *applied* Ply (a mating move, …) **is**.
     pub chain: Vec<CanonicalPly<'a>>,
-    /// The cutoff: the triggering Request's canonical timing.
+    /// The cutoff: the Conclusion's canonical timing.
     pub cutoff: Timestamp,
-    /// How the chain concluded (terminal verdict or ongoing end position).
-    pub conclusion: Conclusion,
+    /// How the chain ended (terminal verdict or ongoing end position).
+    pub end: ChainEnd,
 }
 
 impl NaturalState<'_> {
@@ -130,32 +133,37 @@ struct SlotCandidate<'a> {
 }
 
 /// Computes the natural state of `plies`/`attestations` for the session, cut off
-/// at the canonical attestation timing of `request`.
+/// at the canonical timing of `conclusion`.
 ///
-/// Returns `None` if `request` has no canonical timing (attested mode: no
+/// Returns `None` if `conclusion` has no canonical timing (attested mode: no
 /// attestation from the designated timestamper yet — the cutoff is undefined and
-/// the arbiter must wait). Self-timed, the cutoff is the request's own
-/// `created_at`, always defined.
+/// the Conclusion is pending). Self-timed, the cutoff is the Conclusion's own
+/// `created_at`, always defined. The Conclusion's claim is not read here.
 #[must_use]
 pub fn natural_state<'a>(
     params: &SessionParams,
     plies: &'a [Ply],
     attestations: &'a [Attestation],
-    request: &AdjudicationRequest,
+    conclusion: &Conclusion,
 ) -> Option<NaturalState<'a>> {
     let timestamper = params.timestamper();
     let session = params.session();
     let start = params.anchor(); // t₀: the lower bound and the first slot's anchor.
 
-    // The cutoff: the Request's authoritative timing. Undefined ⇒ cannot rule.
-    let cutoff = canonical_timing(attestations, request.id, request.created_at, timestamper)?;
+    // The cutoff: the Conclusion's canonical timing. Undefined ⇒ pending.
+    let cutoff = canonical_timing(
+        attestations,
+        conclusion.id,
+        conclusion.created_at,
+        timestamper,
+    )?;
 
     let mut chain: Vec<CanonicalPly<'a>> = Vec::new();
     let mut state = params.initial_state();
     let mut anchor = start;
     let mut half_move: u32 = 1;
 
-    let conclusion = loop {
+    let end = loop {
         let signer = params.player_at(half_move);
         let step_no = params.step_at(half_move);
 
@@ -209,7 +217,7 @@ pub fn natural_state<'a>(
 
         match select_candidate(anchor, &candidates, CANDIDATE_CAP, probe) {
             // No candidate is legal in either window: the chain stops, still ongoing.
-            Selection::Unfilled => break Conclusion::Ongoing(Box::new(state)),
+            Selection::Unfilled => break ChainEnd::Ongoing(Box::new(state)),
 
             // A candidate fills the slot: apply it and advance (or terminate on a
             // rule-system ending / timeout the application surfaces).
@@ -222,13 +230,13 @@ pub fn natural_state<'a>(
                 else {
                     // Unreachable: the selected candidate is one of this slot's
                     // candidates. Degrade safely to an ongoing chain end.
-                    break Conclusion::Ongoing(Box::new(state));
+                    break ChainEnd::Ongoing(Box::new(state));
                 };
 
                 // Selection guarantees legality, so the content parses; a defensive
                 // failure stops the chain safely (an illegal Ply is never a loss).
                 let Ok(mv) = Move::parse(&ply.content) else {
-                    break Conclusion::Ongoing(Box::new(state));
+                    break ChainEnd::Ongoing(Box::new(state));
                 };
 
                 // The probe validated the candidate, so a rejection here is a
@@ -236,9 +244,7 @@ pub fn natural_state<'a>(
                 // position. The rejection hands the state back untouched:
                 // degrade to an ongoing end (an illegal Ply is never a loss).
                 let (outcome, next) = match step(state, &mv, at) {
-                    StepResult::Illegal { state, .. } => {
-                        break Conclusion::Ongoing(Box::new(state))
-                    }
+                    StepResult::Illegal { state, .. } => break ChainEnd::Ongoing(Box::new(state)),
                     StepResult::Advanced { outcome, next } => (outcome, next),
                 };
                 chain.push(CanonicalPly { ply, at });
@@ -257,17 +263,13 @@ pub fn natural_state<'a>(
                         anchor = anchor.max(at);
                         half_move = half_move.saturating_add(1);
                     }
-                    None => break Conclusion::Terminal(outcome.verdict, at),
+                    None => break ChainEnd::Terminal(outcome.verdict, at),
                 }
             }
         }
     };
 
-    Some(NaturalState {
-        chain,
-        cutoff,
-        conclusion,
-    })
+    Some(NaturalState { chain, cutoff, end })
 }
 
 #[cfg(test)]
@@ -279,11 +281,11 @@ mod tests {
         clippy::indexing_slicing
     )]
 
-    use super::{natural_state, Conclusion};
-    use crate::event::{AdjudicationRequest, Attestation, EventId, Ply, PublicKey};
+    use super::{natural_state, ChainEnd};
+    use crate::event::{Attestation, Conclusion, EventId, Ply, PublicKey};
     use crate::session::SessionParams;
     use sashite_sanki_engine::domain::outcome::Verdict;
-    use sashite_sanki_engine::domain::status::Status;
+    use sashite_sanki_engine::domain::status::{Outcome3, Status};
     use sashite_sanki_engine::domain::time::{Duration, Timestamp};
     use sashite_sanki_engine::domain::time_control::{Period, TimeControl};
     use sashite_sanki_engine::position::Position;
@@ -292,7 +294,7 @@ mod tests {
     const SECOND: u8 = 20;
     const TIMESTAMPER: u8 = 99;
     const SESSION: u8 = 50;
-    const REQUEST: u8 = 170;
+    const CONCLUSION: u8 = 170;
 
     // A chess rook-and-king endgame: white Rook a1, white King e1, black King e8.
     // White to move. Gives a stock of legal moves for the chain tests.
@@ -336,7 +338,6 @@ mod tests {
         let period = Period::new(Duration::from_secs(600), None, None).expect("valid period");
         SessionParams::new(
             eid(SESSION),
-            pk(2),
             Some(pk(TIMESTAMPER)),
             pk(FIRST),
             pk(SECOND),
@@ -354,7 +355,6 @@ mod tests {
         let period = Period::new(Duration::from_secs(600), None, None).expect("valid period");
         SessionParams::new(
             eid(SESSION),
-            pk(2),
             None, // self-timed: no timestamper designated
             pk(FIRST),
             pk(SECOND),
@@ -364,12 +364,23 @@ mod tests {
         )
     }
 
-    fn request() -> AdjudicationRequest {
-        AdjudicationRequest::new(eid(REQUEST), pk(FIRST), eid(SESSION), pk(2), ts(0))
+    fn conclusion() -> Conclusion {
+        conclusion_at(0)
+    }
+
+    fn conclusion_at(created_at: i64) -> Conclusion {
+        Conclusion::new(
+            eid(CONCLUSION),
+            pk(FIRST),
+            eid(SESSION),
+            Status::Resignation,
+            Outcome3::SecondWins,
+            ts(created_at),
+        )
     }
 
     fn cutoff_att(at: i64) -> Attestation {
-        att(171, REQUEST, at)
+        att(171, CONCLUSION, at)
     }
 
     // Legal moves in the ROOK_KING line.
@@ -390,46 +401,44 @@ mod tests {
             att(103, 3, 300),
             cutoff_att(1000),
         ];
-        let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
+        let ns =
+            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
         assert_eq!(ns.chain.len(), 3);
         assert_eq!(ns.next_half_move(), 4);
         assert_eq!(*ns.chain[0].ply.id.as_bytes(), [1; 32]);
         assert_eq!(*ns.chain[2].ply.id.as_bytes(), [3; 32]);
-        assert!(matches!(ns.conclusion, Conclusion::Ongoing(_)));
+        assert!(matches!(ns.end, ChainEnd::Ongoing(_)));
     }
 
     #[test]
     fn self_timed_chain_uses_event_created_at() {
         // No timestamper and no attestations: the chain is assembled from the plies'
-        // own relay-enforced created_at, and the cutoff from the request's own.
+        // own relay-enforced created_at, and the cutoff from the Conclusion's own.
         let plies = [
             ply_at(1, FIRST, 1, RA1A4, 100),
             ply_at(2, SECOND, 1, KE8E7, 200),
             ply_at(3, FIRST, 2, RA4A5, 300),
         ];
         let no_atts: Vec<Attestation> = Vec::new();
-        let request =
-            AdjudicationRequest::new(eid(REQUEST), pk(FIRST), eid(SESSION), pk(2), ts(1000));
-        let ns = natural_state(&params_self_timed(), &plies, &no_atts, &request)
-            .expect("self-timed request has canonical timing");
+        let ns = natural_state(&params_self_timed(), &plies, &no_atts, &conclusion_at(1000))
+            .expect("a self-timed Conclusion has canonical timing");
         assert_eq!(ns.chain.len(), 3);
         assert_eq!(ns.next_half_move(), 4);
         assert_eq!(*ns.chain[0].ply.id.as_bytes(), [1; 32]);
         assert_eq!(ns.chain[0].at, ts(100));
-        assert!(matches!(ns.conclusion, Conclusion::Ongoing(_)));
+        assert!(matches!(ns.end, ChainEnd::Ongoing(_)));
     }
 
     #[test]
     fn self_timed_cutoff_excludes_a_later_ply() {
-        // The request's own created_at is the cutoff: a ply created after it is excluded.
+        // The Conclusion's own created_at is the cutoff: a ply created after it is excluded.
         let plies = [
             ply_at(1, FIRST, 1, RA1A4, 100),
             ply_at(2, SECOND, 1, KE8E7, 500),
         ];
         let no_atts: Vec<Attestation> = Vec::new();
-        let request =
-            AdjudicationRequest::new(eid(REQUEST), pk(FIRST), eid(SESSION), pk(2), ts(300));
-        let ns = natural_state(&params_self_timed(), &plies, &no_atts, &request).expect("request");
+        let ns = natural_state(&params_self_timed(), &plies, &no_atts, &conclusion_at(300))
+            .expect("conclusion");
         assert_eq!(ns.chain.len(), 1); // ply 2 (created_at 500 > cutoff 300) is excluded
     }
 
@@ -438,7 +447,8 @@ mod tests {
         // A Ply attested exactly at the cutoff is included (the `≤` condition).
         let plies = [ply(1, FIRST, 1, RA1A4)];
         let atts = [att(101, 1, 1000), cutoff_att(1000)];
-        let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
+        let ns =
+            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
         assert_eq!(ns.chain.len(), 1);
     }
 
@@ -456,7 +466,8 @@ mod tests {
             att(103, 3, 2000),
             cutoff_att(1000),
         ];
-        let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
+        let ns =
+            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
         assert_eq!(ns.chain.len(), 2);
         assert_eq!(ns.next_half_move(), 3);
     }
@@ -468,9 +479,10 @@ mod tests {
         // future-slot Ply and cannot fill it. The chain stops at 1.
         let plies = [ply(1, FIRST, 1, RA1A4), ply(2, FIRST, 2, RA4A5)];
         let atts = [att(101, 1, 100), att(102, 2, 200), cutoff_att(1000)];
-        let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
+        let ns =
+            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
         assert_eq!(ns.chain.len(), 1);
-        assert!(matches!(ns.conclusion, Conclusion::Ongoing(_)));
+        assert!(matches!(ns.end, ChainEnd::Ongoing(_)));
     }
 
     #[test]
@@ -478,7 +490,8 @@ mod tests {
         // (second, step 1) present but not attested: pending, excluded → chain of 1.
         let plies = [ply(1, FIRST, 1, RA1A4), ply(2, SECOND, 1, KE8E7)];
         let atts = [att(101, 1, 100), cutoff_att(1000)];
-        let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
+        let ns =
+            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
         assert_eq!(ns.chain.len(), 1);
     }
 
@@ -486,7 +499,8 @@ mod tests {
     fn gap_in_play_order_stops_the_chain() {
         let plies = [ply(1, FIRST, 1, RA1A4)];
         let atts = [att(101, 1, 100), cutoff_att(1000)];
-        let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
+        let ns =
+            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
         assert_eq!(ns.chain.len(), 1);
         assert_eq!(ns.next_half_move(), 2);
         assert!(!ns.is_empty());
@@ -509,7 +523,8 @@ mod tests {
             att(102, 2, 200),
             cutoff_att(1000),
         ];
-        let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
+        let ns =
+            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
         assert_eq!(ns.chain.len(), 3);
         assert_eq!(*ns.chain[2].ply.id.as_bytes(), [3; 32]);
     }
@@ -532,10 +547,11 @@ mod tests {
             att(103, 3, 60),
             cutoff_att(1000),
         ];
-        let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
+        let ns =
+            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
         assert_eq!(ns.chain.len(), 2);
         assert_eq!(*ns.chain[1].ply.id.as_bytes(), [3; 32]);
-        assert!(matches!(ns.conclusion, Conclusion::Ongoing(_)));
+        assert!(matches!(ns.end, ChainEnd::Ongoing(_)));
     }
 
     #[test]
@@ -548,9 +564,10 @@ mod tests {
             ply(2, SECOND, 1, "[\"e8\",\"e6\",null]"),
         ];
         let atts = [att(101, 1, 100), att(102, 2, 200), cutoff_att(1000)];
-        let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
+        let ns =
+            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
         assert_eq!(ns.chain.len(), 1); // the illegal live move is skipped, not in the chain
-        assert!(matches!(ns.conclusion, Conclusion::Ongoing(_)));
+        assert!(matches!(ns.end, ChainEnd::Ongoing(_)));
     }
 
     #[test]
@@ -560,10 +577,10 @@ mod tests {
         let plies = [ply(1, FIRST, 1, "[\"a1\",\"a8\",null]")];
         let atts = [att(101, 1, 100), cutoff_att(1000)];
         let p = params_feen("7k^/6pp/8/8/8/8/8/R3K^3 / W/w");
-        let ns = natural_state(&p, &plies, &atts, &request()).expect("attested request");
+        let ns = natural_state(&p, &plies, &atts, &conclusion()).expect("attested conclusion");
         assert_eq!(ns.chain.len(), 1); // the mating move is part of the chain
-        match ns.conclusion {
-            Conclusion::Terminal(verdict, at) => {
+        match ns.end {
+            ChainEnd::Terminal(verdict, at) => {
                 assert!(matches!(
                     verdict,
                     Verdict::Terminated {
@@ -573,25 +590,26 @@ mod tests {
                 ));
                 assert_eq!(at, ts(100));
             }
-            Conclusion::Ongoing(_) => panic!("expected a checkmate termination"),
+            ChainEnd::Ongoing(_) => panic!("expected a checkmate termination"),
         }
     }
 
     #[test]
-    fn unattested_request_yields_none() {
+    fn unattested_conclusion_yields_none() {
         let plies = [ply(1, FIRST, 1, RA1A4)];
         let atts = [att(101, 1, 100)];
-        assert!(natural_state(&params(), &plies, &atts, &request()).is_none());
+        assert!(natural_state(&params(), &plies, &atts, &conclusion()).is_none());
     }
 
     #[test]
     fn empty_chain_if_no_first_ply() {
         let plies: [Ply; 0] = [];
         let atts = [cutoff_att(1000)];
-        let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
+        let ns =
+            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
         assert!(ns.is_empty());
         assert_eq!(ns.next_half_move(), 1);
-        assert!(matches!(ns.conclusion, Conclusion::Ongoing(_)));
+        assert!(matches!(ns.end, ChainEnd::Ongoing(_)));
     }
 
     #[test]
@@ -611,7 +629,8 @@ mod tests {
             att(103, 3, 60),
             cutoff_att(1000),
         ];
-        let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
+        let ns =
+            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
         assert_eq!(ns.chain.len(), 2);
         assert_eq!(*ns.chain[1].ply.id.as_bytes(), [2; 32]);
         assert_eq!(ns.chain[1].at, ts(50));
@@ -623,9 +642,10 @@ mod tests {
         // never enters its slot — deciders' confirmation of 2026-07-19.
         let plies = [ply(1, FIRST, 1, RA1A4)];
         let atts = [att(101, 1, -5), cutoff_att(1000)];
-        let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
+        let ns =
+            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
         assert!(ns.is_empty());
-        assert!(matches!(ns.conclusion, Conclusion::Ongoing(_)));
+        assert!(matches!(ns.end, ChainEnd::Ongoing(_)));
     }
 
     #[test]
@@ -637,10 +657,11 @@ mod tests {
 
         let plies = [ply(1, FIRST, 1, RA1A4)];
         let atts = [att(101, 1, 700), cutoff_att(1000)];
-        let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
+        let ns =
+            natural_state(&params(), &plies, &atts, &conclusion()).expect("attested conclusion");
         assert_eq!(ns.chain.len(), 1);
-        match ns.conclusion {
-            Conclusion::Terminal(verdict, at) => {
+        match ns.end {
+            ChainEnd::Terminal(verdict, at) => {
                 assert!(matches!(
                     verdict,
                     Verdict::Terminated {
@@ -650,7 +671,7 @@ mod tests {
                 ));
                 assert_eq!(at, ts(700));
             }
-            Conclusion::Ongoing(_) => panic!("expected a played-ply timeout"),
+            ChainEnd::Ongoing(_) => panic!("expected a played-ply timeout"),
         }
     }
 
@@ -676,17 +697,17 @@ mod tests {
             params_feen("-rnbik^bn-r/+f+f+f+f+f+f+f+f/8/8/6P1/8/+P+P+P+P+P+P1+P/-RNBQK^BN-R / j/W");
         let plies = [ply(1, SECOND, 1, "[\"e7\",\"e5\",null]")];
         let atts = [att(101, 1, 100), cutoff_att(1000)];
-        let ns = natural_state(&p, &plies, &atts, &request()).expect("attested request");
+        let ns = natural_state(&p, &plies, &atts, &conclusion()).expect("attested conclusion");
         assert!(ns.is_empty());
         assert_eq!(ns.next_half_move(), 1);
-        match ns.conclusion {
-            Conclusion::Ongoing(state) => {
+        match ns.end {
+            ChainEnd::Ongoing(state) => {
                 assert_eq!(
                     state.position().active_side(),
                     sashite_sanki_engine::domain::side::Side::Second
                 );
             }
-            Conclusion::Terminal(verdict, _) => {
+            ChainEnd::Terminal(verdict, _) => {
                 panic!("expected an ongoing chain, got {verdict:?}")
             }
         }
@@ -1412,7 +1433,7 @@ mod tests {
             att(101, 1, 500),
             att(103, 3, 100),
             att(104, 4, 200),
-            att(171, REQUEST, 1000),
+            att(171, CONCLUSION, 1000),
         ];
         let p = params();
 
@@ -1422,7 +1443,7 @@ mod tests {
             ply(3, SECOND, 1, KE8E7),
             offer(4, KE8E7),
         ];
-        let natural = natural_state(&p, &collapsed, &atts, &request()).expect("a natural state");
+        let natural = natural_state(&p, &collapsed, &atts, &conclusion()).expect("a natural state");
         assert_eq!(natural.chain.len(), 2);
         let tail = natural.chain.last().expect("a tail");
         assert_eq!(
@@ -1439,7 +1460,7 @@ mod tests {
             ply(3, SECOND, 1, KE8E7),
             offer(4, "[\"e8\",\"d7\",null]"),
         ];
-        let natural = natural_state(&p, &kept, &atts, &request()).expect("a natural state");
+        let natural = natural_state(&p, &kept, &atts, &conclusion()).expect("a natural state");
         let tail = natural.chain.last().expect("a tail");
         assert_eq!(
             tail.ply.id,
