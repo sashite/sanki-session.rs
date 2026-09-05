@@ -4,6 +4,21 @@ All notable changes to this crate are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] — 2026-09-05
+
+### Changed
+
+- **`sashite-sanki-engine` `^0.11`** (was `^0.10`). The engine's types are
+  part of this crate's public API (`Position`, `TimeControl`, `Timestamp`,
+  `Side`, `Status`, `Outcome3`, …), so following the engine's minor is a
+  breaking change for a consumer holding 0.10 types — hence the minor bump.
+  Nothing in this crate's own behaviour changes; every test passes unmodified.
+  The reason: this crate and the engine are compiled together into the
+  `sanki` reference module ([ADR-0034](https://github.com/sashite/web-specs.md/blob/main/adr/adr-0034-reference-build.md);
+  `sashite-sanki-kernel-wasm`), which reads the engine's 0.11 API
+  (`rules`, `ggn`, `apply_ply`) beside this crate's — one engine version for
+  both.
+
 ## [0.14.1] — 2026-09-05
 
 ### Corpus

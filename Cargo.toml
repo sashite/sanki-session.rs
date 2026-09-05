@@ -1,6 +1,6 @@
 [package]
 name = "sashite-sanki-session"
-version = "0.14.1"
+version = "0.15.0"
 edition = "2021"
 rust-version = "1.81"
 license = "Apache-2.0"
@@ -12,7 +12,7 @@ keywords = ["chess", "ogi", "xiongqi", "board-game", "session"]
 categories = ["games", "game-development"]
 
 [dependencies]
-sashite-sanki-engine = "0.10"
+sashite-sanki-engine = "0.11"
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }
