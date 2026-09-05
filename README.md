@@ -123,11 +123,12 @@ verdict; `Verdict::scores(params)` gives the two `result` tags to carry.
   `unwrap`/`expect`/`panic`, slice indexing, and overflowing arithmetic.
 - **Deterministic.** The result is a pure function of the events; identity,
   transport, and signature verification are the caller's responsibility.
-- **In lockstep with the client.** The vendored conformance corpus
-  (`tests/conformance/`, v9) is shared with Sashité's TypeScript client, which
-  replays the same vectors: the two implementations cannot drift on which Ply
-  is canonical, on how a chain ends, nor — the vectors carrying an `invoker`
-  and an `expectedVerdict` — on the post-chain verdict.
+- **In lockstep with the reference module.** The vendored conformance corpus
+  (`tests/conformance/`, v10) is the shared test suite of the Sanki kernel —
+  this crate replays it natively, and the reference WebAssembly module built
+  from this crate replays it through its ABI (ADR-0034): the two cannot drift
+  on which Ply is canonical, on how a chain ends, nor — the vectors carrying
+  an `invoker` and an `expectedVerdict` — on the post-chain verdict.
 - **Reported, never guessed.** A Conclusion out of reach gets a typed reason;
   a broken internal invariant during replay is `NoVerdict::Inconsistent`, not a
   wrong resignation — and `select_conclusion` propagates it rather than

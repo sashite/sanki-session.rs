@@ -4,6 +4,27 @@ All notable changes to this crate are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] — 2026-09-05
+
+### Corpus
+
+- **`scenarios.json` v10.** The slot cap `K` is the rule system's, never a
+  vector's: under [ADR-0034](https://github.com/sashite/web-specs.md/blob/main/adr/adr-0034-reference-build.md)
+  a rule system is an executable module with its parameters compiled in, so
+  the optional `candidateCap` field v9 had introduced is withdrawn and the
+  three vectors that used it are replaced by four that pin the same
+  properties at `K = 8` with enough candidates: eight distinct illegal
+  premoves bury a legal one (seven leave it in reach), and a draw-flag toggle
+  on four contents fills the cap (on three, the legal premove is reached).
+  56 vectors. `SessionParams::with_candidate_cap` stays as a library feature,
+  pinned by unit tests.
+
+### Changed
+
+- The README no longer describes the corpus as shared with a TypeScript
+  client kernel: the consumer of the corpus beside this crate is the reference
+  module built from it.
+
 ## [0.14.0] — 2026-09-04
 
 A review pass on the 0.13 API and on the normative corners the review found

@@ -21,9 +21,9 @@
 //!   `invoker` and an `expectedVerdict` (`{ status, result: { first, second } }`):
 //!   the **post-chain resolution** — draw acceptance, abandonment timeout,
 //!   residual resignation, in that order — is then pinned too, so the two
-//!   implementations cannot drift on the verdict either; and a `candidateCap`
-//!   (the session's `K`, the reference document's 8 when absent), so the cap
-//!   is exercised as the session parameter it is.
+//!   implementations cannot drift on the verdict either. The cap `K` is the
+//!   rule system's (8), never a vector's: the vectors that exercise it do so
+//!   with enough candidates (v10).
 //!
 //! The TypeScript client runs both files. Both corpora are vendored with the
 //! crate (`cargo package` ships them), so a missing file is a failure, not a
@@ -46,7 +46,7 @@ use sashite_sanki_engine::domain::time_control::{Period, TimeControl};
 use sashite_sanki_engine::position::Position;
 use sashite_sanki_session::event::{Attestation, EventId, Ply, PublicKey};
 use sashite_sanki_session::natural_state::{natural_state, ChainEnd};
-use sashite_sanki_session::selection::{select_candidate, Candidate, Selection, CANDIDATE_CAP};
+use sashite_sanki_session::selection::{select_candidate, Candidate, Selection};
 use sashite_sanki_session::session::{Seats, SessionParams};
 use sashite_sanki_session::verdict::verdict_at;
 
@@ -166,10 +166,6 @@ struct ScenarioVector {
     /// status and the two players' scores.
     #[serde(rename = "expectedVerdict", default)]
     expected_verdict: Option<ScenarioVerdict>,
-    /// The session's slot selection cap `K` (v9). Absent -> the reference
-    /// document's value.
-    #[serde(rename = "candidateCap", default)]
-    candidate_cap: Option<NonZeroUsize>,
 }
 
 #[derive(serde::Deserialize)]
@@ -276,8 +272,7 @@ fn scenario_conformance() {
             Position::parse(&scenario.position).expect("valid FEEN"),
             Timestamp::from_unix(scenario.t0),
         )
-        .expect("first to move")
-        .with_candidate_cap(scenario.candidate_cap.unwrap_or(CANDIDATE_CAP));
+        .expect("first to move");
 
         let plies: Vec<Ply> = scenario
             .plies

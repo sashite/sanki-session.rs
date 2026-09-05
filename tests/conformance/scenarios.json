@@ -1,5 +1,5 @@
 {
-	"version": 9,
+	"version": 10,
 	"category": "scenario",
 	"vectors": [
 		{
@@ -9893,45 +9893,166 @@
 			"expectedTermination": null
 		},
 		{
-			"id": "scenario.candidate-cap-is-the-sessions",
-			"note": "candidateCap = 1: the session's rule-system document carries K = 1, not the reference document's 8. second premoved a legal Ke8-e7 @50 and then an illegal Ke8-e5 @60, both anterior to first's move @100; the anterior window admits the K newest premoves — the illegal @60 alone — so the slot stays unfilled. Under K = 8 the scan would skip it and reach the legal @50 (chain m1, p1). Pinned so that neither implementation evaluates a session under a cap other than its own",
+			"id": "scenario.eight-distinct-illegal-premoves-bury-a-legal-one",
+			"note": "K = 8, the rule system's cap. second premoved a legal Ke8-e7 (z @100) and then eight DISTINCT illegal moves (x1..x8 @110..@180), all anterior to first's move @500. The anterior window admits the K = 8 most recent premoves — the eight illegal ones — so z is never probed and the slot stays unfilled: flooding one's own window past K is self-harm and nothing else (Move Encoding — Sanki §Bounding a slot's candidates). The next vector, with seven, reaches z: the pair pins K exactly",
 			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
 			"t0": 0,
 			"cutoff": 1000,
-			"candidateCap": 1,
 			"plies": [
 				{
 					"id": "m1",
 					"seat": "first",
 					"step": 1,
 					"move": ["a1", "a4", null],
-					"timedAt": 100
+					"timedAt": 500
 				},
 				{
-					"id": "p1",
+					"id": "z",
 					"seat": "second",
 					"step": 1,
 					"move": ["e8", "e7", null],
-					"timedAt": 50
+					"timedAt": 100
 				},
 				{
-					"id": "p2",
+					"id": "x1",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e6", null],
+					"timedAt": 110
+				},
+				{
+					"id": "x2",
 					"seat": "second",
 					"step": 1,
 					"move": ["e8", "e5", null],
-					"timedAt": 60
+					"timedAt": 120
+				},
+				{
+					"id": "x3",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e4", null],
+					"timedAt": 130
+				},
+				{
+					"id": "x4",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e3", null],
+					"timedAt": 140
+				},
+				{
+					"id": "x5",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "a8", null],
+					"timedAt": 150
+				},
+				{
+					"id": "x6",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "h8", null],
+					"timedAt": 160
+				},
+				{
+					"id": "x7",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "b5", null],
+					"timedAt": 170
+				},
+				{
+					"id": "x8",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "c6", null],
+					"timedAt": 180
 				}
 			],
 			"expectedChain": ["m1"],
+			"expectedTermination": null
+		},
+		{
+			"id": "scenario.seven-distinct-illegal-premoves-leave-the-legal-one-in-reach",
+			"note": "the same session with seven illegal premoves instead of eight: the window {x7..x1, z} has room for z, the latest LEGAL premove, which fills the slot — proof that in the previous vector the cap, not legality, excluded it",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{
+					"id": "m1",
+					"seat": "first",
+					"step": 1,
+					"move": ["a1", "a4", null],
+					"timedAt": 500
+				},
+				{
+					"id": "z",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e7", null],
+					"timedAt": 100
+				},
+				{
+					"id": "x1",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e6", null],
+					"timedAt": 110
+				},
+				{
+					"id": "x2",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e5", null],
+					"timedAt": 120
+				},
+				{
+					"id": "x3",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e4", null],
+					"timedAt": 130
+				},
+				{
+					"id": "x4",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e3", null],
+					"timedAt": 140
+				},
+				{
+					"id": "x5",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "a8", null],
+					"timedAt": 150
+				},
+				{
+					"id": "x6",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "h8", null],
+					"timedAt": 160
+				},
+				{
+					"id": "x7",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "b5", null],
+					"timedAt": 170
+				}
+			],
+			"expectedChain": ["m1", "z"],
 			"expectedTermination": null
 		},
 		{
 			"id": "scenario.draw-flag-toggle-counts-twice-against-the-cap",
-			"note": "candidateCap = 3. second's anterior premoves, newest first: y @130 (Ke8-e5, illegal), x+draw @120 (Ke8-e6, illegal), x @110 (Ke8-e6, illegal), z @100 (Ke8-e7, legal). Identity is the content AND the draw flag, so x and x+draw are two candidates: the window of three is {y, x+draw, x}, all illegal, and the slot stays unfilled — z is never reached. Were the flag not part of the identity, x and x+draw would collapse to one candidate and the window {y, x+draw, z} would select z. The flag's part in the identity is observable only through the cap (each window keeps the candidate its scan reaches first, so it never changes WHICH candidate is selected)",
+			"note": "K = 8. second premoved a legal Ke8-e7 (z @100), then four DISTINCT illegal contents each published twice — without and with the draw flag (x1 @110, x1+draw @120, …, x4 @180) — all anterior to first's move @500. Identity is the content AND the draw flag, so the eight are eight candidates: the window is exactly them, all illegal, and the slot stays unfilled. Were the flag not part of the identity, each pair would collapse to one candidate (the later, flagged twin — the scan's first), the window {x4d, x3d, x2d, x1d, z} would reach z, and the chain would be [m1, z]. The flag's part in the identity is observable only through the cap: each window keeps the candidate its scan reaches first, so it never changes WHICH candidate is selected",
 			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
 			"t0": 0,
 			"cutoff": 1000,
-			"candidateCap": 3,
 			"plies": [
 				{
 					"id": "m1",
@@ -9948,14 +10069,14 @@
 					"timedAt": 100
 				},
 				{
-					"id": "x",
+					"id": "x1",
 					"seat": "second",
 					"step": 1,
 					"move": ["e8", "e6", null],
 					"timedAt": 110
 				},
 				{
-					"id": "xd",
+					"id": "x1d",
 					"seat": "second",
 					"step": 1,
 					"move": ["e8", "e6", null],
@@ -9963,23 +10084,60 @@
 					"draw": true
 				},
 				{
-					"id": "y",
+					"id": "x2",
 					"seat": "second",
 					"step": 1,
 					"move": ["e8", "e5", null],
 					"timedAt": 130
+				},
+				{
+					"id": "x2d",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e5", null],
+					"timedAt": 140,
+					"draw": true
+				},
+				{
+					"id": "x3",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e4", null],
+					"timedAt": 150
+				},
+				{
+					"id": "x3d",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e4", null],
+					"timedAt": 160,
+					"draw": true
+				},
+				{
+					"id": "x4",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e3", null],
+					"timedAt": 170
+				},
+				{
+					"id": "x4d",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e3", null],
+					"timedAt": 180,
+					"draw": true
 				}
 			],
 			"expectedChain": ["m1"],
 			"expectedTermination": null
 		},
 		{
-			"id": "scenario.draw-flag-toggle-reached-past-the-cap",
-			"note": "the same five plies as `draw-flag-toggle-counts-twice-against-the-cap` under candidateCap = 4: the window {y, x+draw, x, z} now reaches the legal z, which fills the slot — proof that the cap, not legality, excluded it under K = 3",
+			"id": "scenario.draw-flag-toggle-under-the-cap-reaches-the-legal-one",
+			"note": "the same construction with three contents (six candidates): the window {x3d, x3, x2d, x2, x1d, x1, z} has room for z, which fills the slot — the cap, not legality, excluded it above",
 			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
 			"t0": 0,
 			"cutoff": 1000,
-			"candidateCap": 4,
 			"plies": [
 				{
 					"id": "m1",
@@ -9996,14 +10154,14 @@
 					"timedAt": 100
 				},
 				{
-					"id": "x",
+					"id": "x1",
 					"seat": "second",
 					"step": 1,
 					"move": ["e8", "e6", null],
 					"timedAt": 110
 				},
 				{
-					"id": "xd",
+					"id": "x1d",
 					"seat": "second",
 					"step": 1,
 					"move": ["e8", "e6", null],
@@ -10011,11 +10169,34 @@
 					"draw": true
 				},
 				{
-					"id": "y",
+					"id": "x2",
 					"seat": "second",
 					"step": 1,
 					"move": ["e8", "e5", null],
 					"timedAt": 130
+				},
+				{
+					"id": "x2d",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e5", null],
+					"timedAt": 140,
+					"draw": true
+				},
+				{
+					"id": "x3",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e4", null],
+					"timedAt": 150
+				},
+				{
+					"id": "x3d",
+					"seat": "second",
+					"step": 1,
+					"move": ["e8", "e4", null],
+					"timedAt": 160,
+					"draw": true
 				}
 			],
 			"expectedChain": ["m1", "z"],
